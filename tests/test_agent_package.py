@@ -1,20 +1,21 @@
 """Smoke tests for the mcp_relay.agent package (no relay or Qt needed).
 
     pip install pytest
-    pytest -q test_agent_package.py
+    pytest -q tests/
 """
 
-from __future__ import annotations
-
 import asyncio
+import contextlib
 import os
 import stat
 import sys
 
-from mcp_relay.agent import (InProcessServerProvider, RelayClient,
+import pytest
+
+from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayClient,
                              StdioServerProvider, UrlServerProvider,
-                             check_providers, load_state, mcp_server_cls,
-                             parse_server_spec, save_state)
+                             check_providers, load_state, parse_server_spec,
+                             save_state)
 
 
 # -- registry / parsing ------------------------------------------------------
@@ -25,35 +26,25 @@ def test_parse_server_spec():
     assert name == "hello"
     assert argv[0] == sys.executable
     for bad in ("noequals", "=python x.py", "hello=", "bad name=x", "relay=x"):
-        try:
+        with pytest.raises(ValueError):
             parse_server_spec(bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad!r}")
 
 
 def test_check_providers_rejects_bad_names():
     for bad in ({"relay": object()}, {"bad name": object()}, {}):
-        try:
+        with pytest.raises(ValueError):
             check_providers(bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad!r}")
-    assert check_providers({"hello": object()}) == {"hello": object()} or True
+    providers = {"hello": object()}
+    assert check_providers(providers) is providers
 
 
 def test_provider_constructors_validate_names():
-    for cls, args in ((StdioServerProvider, ("relay", ["true"])),
-                      (InProcessServerProvider, ("bad name", lambda: None)),
-                      (UrlServerProvider, ("ok", "ftp://x"))):
-        try:
-            cls(*args)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError from {cls.__name__}{args}")
+    with pytest.raises(ValueError):
+        StdioServerProvider("relay", ["true"])
+    with pytest.raises(ValueError):
+        InProcessServerProvider("bad name", lambda: None)
+    with pytest.raises(ValueError):
+        UrlServerProvider("ok", "ftp://x")
 
 
 # -- client ----------------------------------------------------------------
@@ -81,7 +72,7 @@ def test_credentials_roundtrip(tmp_path):
 
 
 def _make_hello_server():
-    server = mcp_server_cls()("hello-test")
+    server = MCPServer("hello-test")
 
     @server.tool()
     def hello_world(name: str = "world") -> str:
@@ -136,7 +127,6 @@ def test_inprocess_server_roundtrip():
 def test_url_instance_unreachable_remote_sends_closed_not_exception():
     """An unreachable remote must end its own session via a 'closed' frame, and
     start()/write()/stop() must never raise or cancel the caller's task."""
-    from mcp_relay.agent import UrlServerProvider
 
     async def main() -> None:
         frames = []
@@ -171,9 +161,6 @@ def test_url_instance_stop_from_another_task_and_while_cancelling():
     """stop() must work when called from a different task than start() (the
     relay's 'close' frame spawns a background task for it) and must not raise
     'exit cancel scope in a different task' or propagate CancelledError."""
-    import contextlib
-
-    from mcp_relay.agent import UrlServerProvider
 
     async def main() -> None:
         frames = []

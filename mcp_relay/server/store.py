@@ -2,8 +2,9 @@
 
 Pairing works like Chromecast / Bluetooth:
 
-1. Your backend (or an admin) asks the relay for a short, single-use pairing
-   code for a specific user id.  The code is shown to the user.
+1. The user asks the relay (via the chat tool ``get_pairing_code`` on
+   ``/mcp/relay``) for a short, single-use pairing code for their user id.
+   The code is shown to the user.
 2. The user types the code into the desktop agent.
 3. The agent redeems the code for a long-lived *device token* that it stores
    locally.  The code is now burnt.  From then on the agent authenticates with
@@ -15,7 +16,6 @@ device tokens are 256-bit random values; it would not be appropriate for
 user-chosen passwords.)
 """
 
-from __future__ import annotations
 from pathlib import Path
 import hashlib
 import secrets
@@ -57,6 +57,7 @@ class Store:
     def __init__(self, path: str = DEFAULT_DB):
         # The relay is a single asyncio process and these queries are tiny, so
         # synchronous sqlite calls are fine for ~100s of users.
+        path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False,
                                    isolation_level=None)
         self._db.row_factory = sqlite3.Row

@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "mcp_relay"
+version = "0.1.0"
+description = "Lets local MCP servers connect to a cloud MCP client (e.g. LibreChat)"
+authors = ["Sebastiaan Mathôt <s.mathot@cogsci.nl>"]
+readme = "readme.md"
+packages = [{include = "mcp_relay"}]
+license = "COPYING"
+repository = "https://github.com/open-cogsci/mcp_relay"
+
+[tool.poetry.dependencies]
+python = ">=3.13"
+fastapi = ">=0.110"
+uvicorn = {version = ">=0.30", extras = ["standard"]}
+websockets = ">=14"
+httpx = ">=0.27"
+mcp = ">=2"
+qtpy = {version = "*", optional = true}
+PyQt6 = {version = "*", optional = true}
+
+[tool.poetry.extras]
+qt = ["qtpy", "PyQt6"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

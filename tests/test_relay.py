@@ -16,13 +16,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from mcp_relay.server.server import Config, create_app
 
-API_KEY, ADMIN_KEY = "test-api-key", "test-admin-key"
+API_KEY = "test-api-key"
 _ids = itertools.count(1)
 
 
 @pytest.fixture
 def client(tmp_path):
-    cfg = Config(api_key=API_KEY, admin_key=ADMIN_KEY, db_path=str(tmp_path / "relay.db"),
+    cfg = Config(api_key=API_KEY, db_path=str(tmp_path / "relay.db"),
                  public_url="https://relay.test")
     with TestClient(create_app(cfg)) as c:
         yield c

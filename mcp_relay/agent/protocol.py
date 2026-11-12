@@ -8,8 +8,6 @@ Kept in sync with relay.py (deployed separately on the server). Frame shapes:
 The relay is MCP-agnostic: "message" frames carry opaque JSON-RPC dicts.
 """
 
-from __future__ import annotations
-
 import json
 import re
 

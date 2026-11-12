@@ -3,18 +3,19 @@
 Three kinds are supported, all behind the same ServerProvider protocol:
 
 * StdioServerProvider     -- spawn a subprocess per session (classic stdio MCP server)
-* InProcessServerProvider -- run an mcp SDK server in this process on memory streams
+* InProcessServerProvider -- run an mcp 2.x SDK server in this process on memory streams
 * UrlServerProvider       -- proxy each session to a remote streamable-HTTP MCP server
+
+``MCPServer`` is re-exported for convenience when building in-process servers.
 """
 
-from __future__ import annotations
+from mcp.server import MCPServer
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
 from .base import LocalServerInstance, OnExit, SendFrame, ServerProvider
 from .inprocess import InProcessServerProvider
 from .stdio import LocalServer, StdioServerProvider, parse_server_spec
 from .url import UrlServerProvider
-from ._compat import mcp_server_cls
 
 
 def check_providers(providers: dict) -> dict:
@@ -30,6 +31,7 @@ def check_providers(providers: dict) -> dict:
 
 
 __all__ = [
+    "MCPServer",
     "InProcessServerProvider",
     "LocalServer",
     "LocalServerInstance",
@@ -39,6 +41,5 @@ __all__ = [
     "StdioServerProvider",
     "UrlServerProvider",
     "check_providers",
-    "mcp_server_cls",
     "parse_server_spec",
 ]

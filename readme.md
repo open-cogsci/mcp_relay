@@ -2,7 +2,7 @@
 
 Copyright Sebastiaan Mathôt 2026. Contains AI-generated code.
 
-Lets a cloud MCP client (e.g. LibreChat) use MCP servers that run on users' desktops, where no inbound connection is possible.
+Lets a cloud MCP client (e.g. SigmundAI/ LibreChat) use MCP servers that run on users' desktops, where no inbound connection is possible.
 
 
 ## Quick start
@@ -10,11 +10,11 @@ Lets a cloud MCP client (e.g. LibreChat) use MCP servers that run on users' desk
 
 ### Server
 
-On the server, the RELAY_API_KEY and start the server. The relay API key should be specified as the bearer token in the client (e.g. LibreChat).
+On the server, set RELAY_API_KEY and start the server. The relay API key should be specified as the bearer token in the client (e.g. LibreChat).
 
 ```bash
 export RELAY_API_KEY=1234
-python relay.py
+python server.py
 ```
 
 

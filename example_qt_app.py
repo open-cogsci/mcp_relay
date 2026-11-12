@@ -13,9 +13,8 @@ Use --remote-url to point at any other streamable-HTTP MCP endpoint instead.
 
 Usage:
 
-  1. Run the relay somewhere reachable:  python relay.py --host 0.0.0.0 --port 8080
-  2. Get a pairing code (chat tool get_pairing_code on /mcp/relay, or
-     POST /admin/pairing-codes with the admin key).
+  1. Run the relay somewhere reachable:  python server.py --host 0.0.0.0 --port 8080
+  2. Get a pairing code (chat tool get_pairing_code on /mcp/relay).
   3. python example_qt_app.py --relay http://localhost:8080 --fs-root .
      Enter the code in the widget and press Connect.
 
@@ -23,17 +22,14 @@ LibreChat (or any MCP client) can then reach all three servers through the
 relay at /mcp/hello, /mcp/files and /mcp/remote.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys
 import threading
 from pathlib import Path
 
-from mcp_relay.agent import (InProcessServerProvider, RelayWidget,
-                             StdioServerProvider, UrlServerProvider,
-                             mcp_server_cls)
+from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayWidget,
+                             StdioServerProvider, UrlServerProvider)
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -47,7 +43,7 @@ def make_hello_server():
     import platform
     import socket
 
-    server = mcp_server_cls()("hello")
+    server = MCPServer("hello")
 
     @server.tool()
     def hello_world(name: str = "world") -> str:

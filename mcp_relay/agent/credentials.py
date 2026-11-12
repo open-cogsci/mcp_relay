@@ -1,12 +1,10 @@
 """Pairing and credential storage for the relay agent.
 
 Pairing works like Chromecast: the user types a short single-use code (shown
-by the relay, e.g. via the /mcp/relay chat tool or the admin API) into the
-agent; the agent exchanges it at POST {relay}/pair/redeem for a long-lived
-device token, stored locally with mode 0600.
+by the relay, via the /mcp/relay chat tool) into the agent; the agent exchanges
+it at POST {relay}/pair/redeem for a long-lived device token, stored locally
+with mode 0600.
 """
-
-from __future__ import annotations
 
 import contextlib
 import json

@@ -1,26 +1,25 @@
 """In-process MCP server provider.
 
-Runs an `mcp` SDK server *inside this process* on in-memory streams, one
+Runs an `mcp` 2.x SDK server *inside this process* on in-memory streams, one
 instance per relay session. Use this when the MCP tools must touch objects
 that live in your own process (e.g. a Qt application whose tools manipulate
 GUI widgets) instead of spawning a subprocess.
 
 The server factory is a zero-argument callable returning an ``MCPServer``
-(mcp>=2) / ``FastMCP`` (mcp 1.x) or a low-level ``Server``; use
-``servers.mcp_server_cls()`` for a version-agnostic class. Because the
-factory is called per session, give each session a fresh server instance.
+(or a low-level ``Server``). Because the factory is called per session, give
+each session a fresh server instance.
 """
-
-from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
+
+import anyio
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from . import _compat
-from .base import OnExit, SendFrame
+from .base import OnExit, SendFrame, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -37,15 +36,13 @@ class InProcessServerInstance:
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
-        import anyio
-
-        # Plain anyio memory streams satisfy the SDK's ReadStream/WriteStream
-        # protocols on both mcp 1.x and 2.x.
+        # Plain anyio memory streams satisfy the SDK's read/write stream protocols.
         self._to_server_send, to_server_recv = anyio.create_memory_object_stream(100)
         from_server_send, from_server_recv = anyio.create_memory_object_stream(100)
-        server = _compat.lowlevel_server(self._factory())
+        server = self._factory()
+        lowlevel = getattr(server, "_lowlevel_server", server)  # MCPServer -> low-level Server
         self._tasks = [
-            asyncio.create_task(self._run(server, to_server_recv, from_server_send)),
+            asyncio.create_task(self._run(lowlevel, to_server_recv, from_server_send)),
             asyncio.create_task(self._pump(from_server_recv)),
         ]
         log.info("[%s] in-process MCP server started", self.sid[:8])
@@ -72,7 +69,7 @@ class InProcessServerInstance:
                     continue
                 try:
                     await self._send({"type": "message", "session": self.sid,
-                                      "data": _compat.message_to_dict(sm)})
+                                      "data": session_message_to_dict(sm)})
                 except Exception:
                     return  # relay connection is gone
         except asyncio.CancelledError:
@@ -80,7 +77,7 @@ class InProcessServerInstance:
 
     async def write(self, msg: dict) -> None:
         """Relay -> in-process server."""
-        await self._to_server_send.send(_compat.to_session_message(msg))
+        await self._to_server_send.send(to_session_message(msg))
 
     async def stop(self) -> None:
         self._stopping = True

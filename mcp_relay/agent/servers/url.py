@@ -18,15 +18,15 @@ Now a remote failure only ends its own session, reported to the relay with a
 ``{"type": "closed", ...}`` frame.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging
 
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
+
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from . import _compat
-from .base import OnExit, SendFrame
+from .base import OnExit, SendFrame, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -49,19 +49,11 @@ class UrlServerInstance:
         self._client = None  # owned httpx2 client, if we had to create one
 
     def _make_cm(self):
-        from mcp.client.streamable_http import streamable_http_client
-
-        if not self.headers:
-            return streamable_http_client(self.url)
-        try:
-            # mcp 1.x accepts headers directly
-            return streamable_http_client(self.url, headers=self.headers)
-        except TypeError:
-            # mcp >= 2.x takes an httpx2 client instead
-            import httpx2
-
+        if self.headers:
+            # mcp 2.x takes a pre-configured httpx2 client for custom headers.
             self._client = httpx2.AsyncClient(headers=self.headers)
             return streamable_http_client(self.url, http_client=self._client)
+        return streamable_http_client(self.url)
 
     async def start(self) -> None:
         """Start the dedicated proxy task. The remote is contacted lazily (on the
@@ -92,7 +84,7 @@ class UrlServerInstance:
                             log.warning("[%s] remote %s stream error: %r", self.sid[:8], self.url, sm)
                             continue
                         await self._send({"type": "message", "session": self.sid,
-                                          "data": _compat.message_to_dict(sm)})
+                                          "data": session_message_to_dict(sm)})
                 finally:
                     pump.cancel()
                     # return_exceptions so the pump's cancellation doesn't mask anything
@@ -132,7 +124,7 @@ class UrlServerInstance:
                 if msg is None:  # stop sentinel
                     return
                 try:
-                    sm = _compat.to_session_message(msg)
+                    sm = to_session_message(msg)
                 except Exception:
                     log.warning("[%s] dropping invalid JSON-RPC frame from relay: %.200r",
                                 self.sid[:8], msg)

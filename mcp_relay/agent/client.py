@@ -11,15 +11,13 @@ reported through the optional ``on_state`` callback
 ("connecting" | "online" | "offline" | "fatal").
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json
 import logging
 import random
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus

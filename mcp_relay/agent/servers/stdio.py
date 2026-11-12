@@ -5,8 +5,6 @@ speaks MCP over stdio (`python my_server.py`, `uvx some-server`,
 `node_modules/.bin/mcp-server-filesystem ...`, ...).
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json

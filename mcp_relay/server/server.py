@@ -25,8 +25,6 @@ Scope: implements the classic session-based Streamable HTTP transport
 (``initialize`` + ``Mcp-Session-Id``).  See README for limitations.
 """
 
-from __future__ import annotations
-
 import asyncio
 import hmac
 import json
@@ -75,8 +73,6 @@ ERR_TIMEOUT = -32001
 @dataclass
 class Config:
     api_key: str  # shared secret between LibreChat and the relay
-    admin_key: str  # protects /admin/*; keep it away from LibreChat
-    db_path: str = "relay.db"
     user_header: str = "x-user-id"
     request_timeout: float = 300.0  # max wait for one tool call
     session_ttl: float = 24 * 3600.0  # idle sessions are closed after this
@@ -86,20 +82,18 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        missing = [k for k in ("RELAY_API_KEY", "RELAY_ADMIN_KEY") if not os.environ.get(k)]
-        if missing:
+        if not os.environ.get("RELAY_API_KEY"):
             raise SystemExit(
-                f"Missing environment variable(s): {', '.join(missing)}\n"
-                "Generate secrets with:  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+                "Missing environment variable: RELAY_API_KEY\n"
+                "Generate one with:  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
             )
         return cls(
             api_key=os.environ["RELAY_API_KEY"],
-            admin_key=os.environ["RELAY_ADMIN_KEY"],
-            db_path=os.environ.get("RELAY_DB", "relay.db"),
             user_header=os.environ.get("RELAY_USER_HEADER", "x-user-id").lower(),
             request_timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", 300)),
             session_ttl=float(os.environ.get("RELAY_SESSION_TTL", 24 * 3600)),
             max_sessions_per_user=int(os.environ.get("RELAY_MAX_SESSIONS_PER_USER", 16)),
+            keepalive=float(os.environ.get("RELAY_KEEPALIVE", 15)),
             public_url=os.environ.get("RELAY_PUBLIC_URL") or None,
         )
 
@@ -122,7 +116,9 @@ def sse(msg: dict) -> str:
 
 def bearer(headers) -> str | None:
     scheme, _, token = headers.get("authorization", "").partition(" ")
-    return token.strip() or None if scheme.lower() == "bearer" else None
+    if scheme.lower() != "bearer":
+        return None
+    return token.strip() or None
 
 
 def key_ok(supplied: str | None, expected: str) -> bool:
@@ -367,7 +363,7 @@ async def unsolicited_stream(hub: Hub, s: Session) -> AsyncIterator[str]:
 
 def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or Config.from_env()
-    store = Store(cfg.db_path)
+    store = Store()
     hub = Hub(cfg)
     limiter = FailureLimiter()
 
@@ -402,10 +398,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not key_ok(bearer(request.headers), cfg.api_key):
             raise RelayError(401, "Invalid or missing API key")
         return validate_user_id(request.headers.get(cfg.user_header))
-
-    def admin_auth(request: Request) -> None:
-        if not key_ok(bearer(request.headers), cfg.admin_key):
-            raise RelayError(401, "Invalid or missing admin key")
 
     def check_server_name(server: str) -> None:
         if not SERVER_NAME_RE.match(server):
@@ -530,9 +522,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         try:
             hello = json.loads(await asyncio.wait_for(ws.receive_text(), 10))
             servers = hello["servers"]
-            assert hello["type"] == "hello" and isinstance(servers, list)
-            assert all(isinstance(n, str) and SERVER_NAME_RE.match(n) for n in servers)
-            assert not RESERVED_SERVER_NAMES & set(servers)
+            if (hello.get("type") != "hello" or not isinstance(servers, list)
+                    or not all(isinstance(n, str) and SERVER_NAME_RE.match(n) for n in servers)
+                    or RESERVED_SERVER_NAMES & set(servers)):
+                raise ValueError("invalid hello frame")
         except Exception:
             await ws.close(code=CLOSE_BAD_HELLO,
                            reason="Invalid hello frame: expected a list of server names (reserved: relay)")
@@ -551,39 +544,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         finally:
             store.touch(device.id)
             await hub.unregister(conn)
-
-    # -- admin endpoints (called by YOUR backend / ops, never by LibreChat) --
-
-    @app.post("/admin/pairing-codes")
-    async def admin_create_code(request: Request):
-        admin_auth(request)
-        try:
-            user_id = validate_user_id((await request.json()).get("user_id"))
-        except RelayError:
-            raise
-        except Exception:
-            raise RelayError(400, "Expected JSON like {\"user_id\": \"...\"}")
-        code, ttl = store.create_pairing_code(user_id)
-        return {"code": code, "expires_in": ttl, "user_id": user_id}
-
-    @app.get("/admin/devices")
-    async def admin_list_devices(request: Request, user_id: str | None = None):
-        admin_auth(request)
-        out = []
-        for d in store.list_devices(user_id):
-            conn = hub.agents.get(d.user_id)
-            out.append({**d.__dict__, "online": conn is not None and conn.device_id == d.id,
-                        "servers": conn.servers if conn is not None and conn.device_id == d.id else []})
-        return out
-
-    @app.delete("/admin/devices/{device_id}")
-    async def admin_revoke_device(device_id: str, request: Request):
-        admin_auth(request)
-        device = store.get_device(device_id)
-        if device is None:
-            raise RelayError(404, "No such device")
-        await revoke_device(device)
-        return {"revoked": device_id}
 
     @app.get("/healthz")
     async def healthz():

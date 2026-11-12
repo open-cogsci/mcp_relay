@@ -12,15 +12,24 @@ e.g. from a command-line flag); the user never sees or edits it.
 
 The agent runs on its own QThread with its own asyncio loop; all cross-thread
 communication goes through Qt signals, so the widget is safe to use from the
-GUI thread of any Qt application (OpenSesame, a tray app, ...). Qt is optional
-for the rest of the package: without qtpy/a Qt binding, importing this module
-still works and instantiating RelayWidget raises ImportError.
+GUI thread of any Qt application (OpenSesame, a tray app, ...). This module
+requires qtpy + a Qt binding, but the rest of the package does not:
+``mcp_relay.agent`` imports ``RelayWidget`` lazily, so the CLI agent works
+in environments without Qt.
 
-"connecting"/"reconnecting"/"fatal" are auxiliary states; the three primary
-user states are DISCONNECTED / NEEDS_PAIRING / CONNECTED.
+User-facing state machine (see ``RelayWidget.state`` / ``state_changed``)::
+
+    disconnected --Connect--> connecting --online--> connected     (if paired)
+    disconnected --Connect--> needs_pairing                         (if not paired)
+    needs_pairing --Pair ok--> connecting --online--> connected
+    needs_pairing --Cancel--> disconnected
+    connected     --Disconnect--> disconnected
+    connected     --Disconnect & Unpair--> disconnected (credentials removed)
+    connecting/connected --connection lost--> reconnecting --online--> connected
+    connecting/connected --relay rejects device--> unpaired --> disconnected
+
+The three primary user states are DISCONNECTED / NEEDS_PAIRING / CONNECTED.
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
@@ -28,15 +37,15 @@ import socket
 import threading
 from pathlib import Path
 
+from qtpy.QtCore import QThread, Signal
+from qtpy.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                            QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
+
 from .client import Fatal, RelayClient
 from .credentials import (DEFAULT_STATE_FILE, PairingError, delete_state,
                           load_state, redeem_pairing_code, save_state)
 
 log = logging.getLogger("relay-agent")
-from qtpy.QtCore import QThread, Signal
-from qtpy.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                            QPlainTextEdit, QPushButton, QVBoxLayout,
-                            QWidget)
 
 
 # The states the widget can be in. The three primary user states are
@@ -73,7 +82,7 @@ class _AgentThread(QThread):
             # report it, keep the widget usable.
             log.exception("agent thread crashed")
             self.log_message.emit("Agent thread crashed unexpectedly; see log.")
-            self.state_changed.emit("failed")            
+            self.state_changed.emit("failed")
 
     async def _main(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -205,8 +214,8 @@ class RelayWidget(QWidget):
             return "Connection lost. Reconnecting automatically. Press Disconnect to stop"
         if self._state == "needs_pairing":
             return ("Enable Sigmund's application-connector tool and ask for a pairing code")
-        # The fatal state should never be shown because it transitions 
-        # immediately to disconnected
+        # The fatal state should never be shown because it transitions
+        # immediately to disconnected (via _unpair)
         if self._state == "fatal":
             return ("The relay rejected this device (revoked or replaced). "
                     "Press Connect to retry, or Unpair to pair a new device.")

@@ -1,3 +1,5 @@
 import os
 import sys
-sys.path.append(os.path.basename(__file__))
+
+# Make the repo root importable when running plain `pytest` from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

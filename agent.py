@@ -17,8 +17,6 @@ Qt widget (see example_qt_app.py). This CLI exposes the stdio-subprocess
 flavor only.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging

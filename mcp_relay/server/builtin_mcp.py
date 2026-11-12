@@ -20,8 +20,6 @@ The server is stateless and tiny: it answers each POST with a plain JSON body
 (no session, no SSE) and only implements what a tools-only server needs.
 """
 
-from __future__ import annotations
-
 import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
