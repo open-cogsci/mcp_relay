@@ -26,7 +26,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from store import Device, Store
+from .store import Device, Store
 
 SERVER_NAME = "relay"  # URL path /mcp/relay; agents may not use this name
 LATEST_VERSION = "2025-06-18"

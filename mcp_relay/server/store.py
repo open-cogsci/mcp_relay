@@ -16,7 +16,7 @@ user-chosen passwords.)
 """
 
 from __future__ import annotations
-
+from pathlib import Path
 import hashlib
 import secrets
 import sqlite3
@@ -27,6 +27,7 @@ from dataclasses import dataclass
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 8  # 31**8 ~ 8.5e11 possibilities
 CODE_TTL_SECONDS = 600
+DEFAULT_DB = Path.home() / ".config" / "mcp-relay-server" / "relay.db"
 
 
 def _sha256(value: str) -> str:
@@ -53,10 +54,11 @@ class Device:
 
 
 class Store:
-    def __init__(self, path: str = "relay.db"):
+    def __init__(self, path: str = DEFAULT_DB):
         # The relay is a single asyncio process and these queries are tiny, so
         # synchronous sqlite calls are fine for ~100s of users.
-        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._db = sqlite3.connect(path, check_same_thread=False,
+                                   isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(
             """

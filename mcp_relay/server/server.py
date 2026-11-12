@@ -27,7 +27,6 @@ Scope: implements the classic session-based Streamable HTTP transport
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import hmac
 import json
@@ -39,13 +38,14 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from builtin_mcp import SERVER_NAME as BUILTIN_SERVER, BuiltinMCP
-from store import Device, Store
+from .builtin_mcp import SERVER_NAME as BUILTIN_SERVER, BuiltinMCP
+from .store import Device, Store
 
 log = logging.getLogger("relay")
 
@@ -590,18 +590,3 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"ok": True}
 
     return app
-
-
-def main() -> None:
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="MCP relay server")
-    parser.add_argument("--host", default="127.0.0.1", help="bind address (put TLS in front of it!)")
-    parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    uvicorn.run(create_app(Config.from_env()), host=args.host, port=args.port, ws_max_size=MAX_WS_MESSAGE)
-
-
-if __name__ == "__main__":
-    main()

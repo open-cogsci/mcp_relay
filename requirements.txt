@@ -3,4 +3,6 @@ uvicorn[standard]>=0.30
 websockets>=14        # agent uses the websockets.asyncio client API
 httpx>=0.27
 mcp>=1.2              # only for hello_server.py (works with 1.x FastMCP or 2.x MCPServer)
-pytest>=8             # only for test_relay.py
+pytest>=8             # only for test_relay.py / test_agent_package.py
+# Optional, only for example_qt_app.py / RelayWidget (pick one binding):
+#   qtpy + PyQt6 (or PyQt5/PySide6)

@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from relay import Config, create_app
+from mcp_relay.server.server import Config, create_app
 
 API_KEY, ADMIN_KEY = "test-api-key", "test-admin-key"
 _ids = itertools.count(1)
