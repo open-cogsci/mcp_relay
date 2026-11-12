@@ -107,12 +107,22 @@ def main() -> None:
     from qtpy.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    kwargs = {"relay_url": args.relay}
+    kwargs = {}
     if args.state_file:
         kwargs["state_file"] = args.state_file
-    widget = RelayWidget(providers=providers, **kwargs)
+    # The relay URL comes from the command line; the widget never asks for it.
+    widget = RelayWidget(relay_url=args.relay, providers=providers, **kwargs)
     widget.setWindowTitle("MCP relay agent — three server kinds")
-    widget.resize(560, 460)
+    widget.resize(560, 500)
+
+    # Watch the user-facing state machine (disconnected / needs_pairing /
+    # connecting / connected / reconnecting / fatal) in the window title.
+    def on_state(state: str) -> None:
+        widget.setWindowTitle(f"[{state}] MCP relay agent — three server kinds")
+        print(f"state -> {state}")
+
+    widget.state_changed.connect(on_state)
+    on_state(widget.state)
     widget.show()
     sys.exit(app.exec())
 

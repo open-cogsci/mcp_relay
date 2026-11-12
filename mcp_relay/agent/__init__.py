@@ -13,9 +13,10 @@ Typical embedding (e.g. in OpenSesame)::
 
     from mcp_relay.agent import RelayWidget, InProcessServerProvider
 
-    widget = RelayWidget(providers={"opensesame": InProcessServerProvider(
-        "opensesame", make_my_mcp_server)},
-        state_file="~/.config/opensesame/relay-credentials.json")
+    widget = RelayWidget(relay_url="https://relay.example.com",
+                         providers={"opensesame": InProcessServerProvider(
+                             "opensesame", make_my_mcp_server)},
+                         state_file="~/.config/opensesame/relay-credentials.json")
 
 For a non-GUI embedding use ``RelayClient`` directly; ``agent.py`` shows the
 minimal CLI usage with stdio servers.
