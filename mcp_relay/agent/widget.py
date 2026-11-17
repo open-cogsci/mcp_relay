@@ -64,15 +64,6 @@ log = logging.getLogger("relay-agent")
 STATES = ("disconnected", "needs_pairing", "connecting", "connected",
           "reconnecting", "fatal")
 
-_STATE_COLORS = {
-    "disconnected": "#666666",
-    "needs_pairing": "#b26a00",
-    "connecting": "#b26a00",
-    "reconnecting": "#b26a00",
-    "connected": "#1a7f37",
-    "fatal": "#c01c28",
-}
-
 
 class _GuiDispatcher(QObject):
     """Marshals callables onto the GUI thread.
@@ -280,9 +271,9 @@ class RelayWidget(QWidget):
         # checked state mirrors provider.enabled, so servers can be turned on
         # and off at runtime instead of only at initialization.
         self._servers_container = QWidget()
-        servers_row = QHBoxLayout(self._servers_container)
+        servers_row = QVBoxLayout(self._servers_container)
         servers_row.setContentsMargins(0, 0, 0, 0)
-        servers_row.addWidget(QLabel("Servers:"))
+        servers_row.addWidget(QLabel("Allow Sigmund to"))
         self._toggle_buttons: dict[str, QPushButton] = {}
         for name, provider in self._providers.items():
             btn = QPushButton(getattr(provider, "display_name", None) or name)
@@ -297,6 +288,12 @@ class RelayWidget(QWidget):
             servers_row.addWidget(btn)
         servers_row.addStretch(1)
         layout.addWidget(self._servers_container)
+        
+        layout.addStretch()
+
+        self._status_label = QLabel()
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
 
         # Pairing input, wrapped in a container so it can be shown only
         # when the user actually needs to enter a pairing code.
@@ -304,7 +301,7 @@ class RelayWidget(QWidget):
         pair_row = QHBoxLayout(self._pair_container)
         pair_row.setContentsMargins(0, 0, 0, 0)
         self._code_edit = QLineEdit()
-        self._code_edit.setPlaceholderText("Pairing code, e.g. A12B-3C4D")
+        self._code_edit.setPlaceholderText("XXXX-XXXX")
         self._code_edit.returnPressed.connect(self._on_pair_clicked)
         self._pair_btn = QPushButton("Pair")
         self._pair_btn.clicked.connect(self._on_pair_clicked)
@@ -323,47 +320,29 @@ class RelayWidget(QWidget):
         btn_row.addWidget(self._connect_btn)
         btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._action_btn)
-        layout.addLayout(btn_row)
-
-        self._status_label = QLabel()
-        self._status_label.setWordWrap(True)
-        layout.addWidget(self._status_label)
-
-        self._log = QPlainTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumBlockCount(500)
-        layout.addWidget(self._log, 1)
+        layout.addLayout(btn_row)        
 
     def _status_text(self) -> str:
         if self._state == "connected":
-            names = self.enabled_servers()
-            if names:
-                return "Connected — exposing: " + ", ".join(names)
-            return "Connected — no servers enabled (toggle one on above)"
+            return "Connected to chat.sigmundai.eu"
         if self._state == "connecting":
-            return "Connecting…"
+            return "Connecting to chat.sigmundai.eu…"
         if self._state == "reconnecting":
             return "Connection lost. Reconnecting automatically. Press Disconnect to stop"
         if self._state == "needs_pairing":
-            return ("Enable Sigmund's application-connector tool and ask for a pairing code")
+            return ("Enable the get-pairing-code tool in chat.sigmundai.eu and ask for a code")
         # The fatal state should never be shown because it transitions
         # immediately to disconnected (via _unpair)
         if self._state == "fatal":
             return ("The relay rejected this device (revoked or replaced). "
                     "Press Connect to retry, or Unpair to pair a new device.")
-        # disconnected
-        if self._credentials:
-            dev = self._credentials.get("device_id", "?")
-            return f"Paired as {dev}. Press Connect to go online."
-        return "Not connected"
+        return "Not connected to chat.sigmundai.eu"
 
     def _refresh(self) -> None:
         state = self._state
         paired = bool(self._credentials)
         running = self._thread is not None
         self._status_label.setText(self._status_text())
-        self._status_label.setStyleSheet(
-            f"color: {_STATE_COLORS.get(state, '#000')}; font-weight: bold;")
 
         # pairing input is only visible when a code is actually needed
         self._pair_container.setVisible(state == "needs_pairing")
@@ -391,7 +370,7 @@ class RelayWidget(QWidget):
             self._action_btn.setVisible(False)
 
     def _append_log(self, text: str) -> None:
-        self._log.appendPlainText(text)
+        log.info(text)
 
     # -- server toggles ------------------------------------------------------
 
