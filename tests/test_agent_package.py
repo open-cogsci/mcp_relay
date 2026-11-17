@@ -6,16 +6,20 @@
 
 import asyncio
 import contextlib
+import json
 import os
 import stat
 import sys
+import threading
+import time
 
 import pytest
 
 from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayClient,
                              StdioServerProvider, UrlServerProvider,
-                             check_providers, load_state, parse_server_spec,
-                             save_state)
+                             call_args_provider, check_providers,
+                             enabled_providers, load_state, parse_server_spec,
+                             save_state, validate_server_list)
 
 
 # -- registry / parsing ------------------------------------------------------
@@ -36,6 +40,9 @@ def test_check_providers_rejects_bad_names():
             check_providers(bad)
     providers = {"hello": object()}
     assert check_providers(providers) is providers
+    # A provider whose .name doesn't match its registry key is rejected.
+    with pytest.raises(ValueError):
+        check_providers({"hello": StdioServerProvider("other", ["true"])})
 
 
 def test_provider_constructors_validate_names():
@@ -47,6 +54,101 @@ def test_provider_constructors_validate_names():
         UrlServerProvider("ok", "ftp://x")
 
 
+def test_validate_server_list():
+    assert validate_server_list(["a", "b"]) == ["a", "b"]
+    assert validate_server_list([]) == []
+    for bad in ("x", [1], ["relay"], ["bad name"], ["a", "a"], None):
+        with pytest.raises(ValueError):
+            validate_server_list(bad)
+
+
+# -- provider metadata: display_name / enabled / args_provider ----------------
+
+
+def test_provider_metadata_defaults_and_overrides():
+    p = StdioServerProvider("hello", ["true"])
+    assert p.name == "hello" and p.display_name == "hello"
+    assert p.enabled is True and p.args_provider is None
+    assert p.argv == ["true"]
+
+    q = UrlServerProvider("remote", "http://x/mcp", display_name="Remote server",
+                          enabled=False, args_provider=lambda: None)
+    assert q.display_name == "Remote server"
+    assert q.enabled is False
+    assert q.url == "http://x/mcp"
+    assert callable(q.args_provider)
+
+    r = InProcessServerProvider("inproc", lambda: None, display_name="In process")
+    assert r.display_name == "In process" and r.enabled is True
+
+    # enabled is mutable (the widget toggles it at runtime)
+    q.enabled = True
+    assert q.enabled is True
+
+
+def test_enabled_providers_filters_by_flag():
+    providers = {
+        "a": StdioServerProvider("a", ["true"], enabled=True),
+        "b": StdioServerProvider("b", ["true"], enabled=False),
+        "c": object(),  # plain provider without metadata counts as enabled
+    }
+    assert list(enabled_providers(providers)) == ["a", "c"]
+    providers["b"].enabled = True
+    assert list(enabled_providers(providers)) == ["a", "b", "c"]
+
+
+def test_stdio_args_provider_appends_argv_at_create():
+    calls = []
+
+    def args():
+        calls.append(1)
+        return ["/some/root"]
+
+    p = StdioServerProvider("files", ["mcp-server-filesystem"], args_provider=args)
+    assert p.argv == ["mcp-server-filesystem"]  # base argv is unchanged
+    inst = p.create("sess", send=None, on_exit=lambda s: None)
+    assert inst.argv == ["mcp-server-filesystem", "/some/root"]
+    assert len(calls) == 1  # called once per created session
+    # a single string is wrapped; None means no extra args
+    p2 = StdioServerProvider("s", ["cmd"], args_provider=lambda: "/root")
+    assert p2.create("s1", None, lambda s: None).argv == ["cmd", "/root"]
+    p3 = StdioServerProvider("n", ["cmd"], args_provider=lambda: None)
+    assert p3.create("s2", None, lambda s: None).argv == ["cmd"]
+    # a bad return type raises (the client turns this into a 'closed' frame)
+    p4 = StdioServerProvider("bad", ["cmd"], args_provider=lambda: 42)
+    with pytest.raises(TypeError):
+        p4.create("s3", None, lambda s: None)
+
+
+def test_inprocess_args_provider_becomes_factory_args():
+    seen = []
+
+    def factory(root):
+        seen.append(root)
+        return MCPServer("t")
+
+    p = InProcessServerProvider("fs", factory, args_provider=lambda: ["/root"])
+    inst = p.create("sess", send=None, on_exit=lambda s: None)
+    assert inst._args == ("/root",)
+    # scalar and None are normalized too
+    p2 = InProcessServerProvider("s", factory, args_provider=lambda: "/r")
+    assert p2.create("x", None, lambda s: None)._args == ("/r",)
+    p3 = InProcessServerProvider("n", factory)
+    assert p3.create("y", None, lambda s: None)._args == ()
+
+
+def test_url_args_provider_appends_path_or_headers():
+    p = UrlServerProvider("r", "http://x/mcp", args_provider=lambda: ["team", "42"])
+    inst = p.create("s", None, lambda s: None)
+    assert inst.url == "http://x/mcp/team/42" and inst.headers == {}
+    p2 = UrlServerProvider("r", "http://x/mcp/", args_provider=lambda: {"X-Token": "t"})
+    inst2 = p2.create("s", None, lambda s: None)
+    assert inst2.url == "http://x/mcp/" and inst2.headers == {"X-Token": "t"}
+    p3 = UrlServerProvider("r", "http://x/mcp", headers={"A": "1"})
+    inst3 = p3.create("s", None, lambda s: None)
+    assert inst3.url == "http://x/mcp" and inst3.headers == {"A": "1"}
+
+
 # -- client ----------------------------------------------------------------
 
 
@@ -55,6 +157,87 @@ def test_client_ws_url_and_server_names():
                     {"hello": StdioServerProvider("hello", ["true"])})
     assert c.ws_url == "ws://localhost:8080/agent/connect"
     assert c.server_names == ["hello"]
+
+
+def test_client_server_names_follows_enabled_flag():
+    on = StdioServerProvider("on", ["true"])
+    off = StdioServerProvider("off", ["true"], enabled=False)
+    c = RelayClient("http://x/", "tok", {"on": on, "off": off})
+    assert c.server_names == ["on"]
+    off.enabled = True
+    assert c.server_names == ["on", "off"]
+
+
+def test_client_open_frame_for_disabled_or_failing_server_sends_closed():
+    """An 'open' for a disabled server, or whose args_provider raises, must
+    produce a 'closed' frame for that session only -- never an exception.
+
+    create() runs in a worker thread (asyncio.to_thread) so a blocking
+    args_provider (e.g. a GUI dialog) cannot stall the agent's event loop.
+    """
+
+    async def main() -> None:
+        sent = []
+        loop_thread = threading.get_ident()
+        create_threads = set()
+
+        class FakeWs:
+            async def send(self, raw: str) -> None:
+                sent.append(json.loads(raw))
+
+        def boom():
+            raise RuntimeError("user cancelled the dialog")
+
+        def slow():
+            create_threads.add(threading.get_ident())
+            time.sleep(0.05)  # would block the event loop if run inline
+            return ["/root"]
+
+        providers = {
+            "off": StdioServerProvider("off", ["true"], enabled=False),
+            "boom": StdioServerProvider("boom", ["true"], args_provider=boom),
+            "slow": StdioServerProvider("slow", ["true"], args_provider=slow),
+        }
+        c = RelayClient("http://x/", "tok", providers)
+        ws = FakeWs()
+        await c._handle(ws, {"type": "open", "session": "s1", "server": "off"})
+        await c._handle(ws, {"type": "open", "session": "s2", "server": "boom"})
+        await c._handle(ws, {"type": "open", "session": "s3", "server": "nope"})
+        await c._handle(ws, {"type": "open", "session": "s4", "server": "slow"})
+        closed = {(f["session"], f["reason"]) for f in sent if f.get("type") == "closed"}
+        assert ("s1", "server 'off' is not enabled on this agent") in closed
+        assert any(s == "s2" and "user cancelled" in r for s, r in closed)
+        assert any(s == "s3" and "not enabled" in r for s, r in closed)
+        # the slow args_provider really ran off the event-loop thread ...
+        assert create_threads and loop_thread not in create_threads
+        # ... and its args were used: 'slow' started (no closed frame for s4)
+        assert not any(s == "s4" for s, _ in closed)
+        assert "s4" in c.sessions
+        await c._stop_all()
+
+    asyncio.run(main())
+
+
+def test_client_update_servers_sends_frame_only_when_connected_and_changed():
+    async def main() -> None:
+        sent = []
+
+        class FakeWs:
+            async def send(self, raw: str) -> None:
+                sent.append(raw)
+
+        off = StdioServerProvider("off", ["true"], enabled=False)
+        c = RelayClient("http://x/", "tok", {"on": StdioServerProvider("on", ["true"]), "off": off})
+        assert await c.update_servers() is False  # not connected
+        c._ws = FakeWs()
+        c._advertised = ["on"]
+        assert await c.update_servers() is True and sent == []  # unchanged
+        off.enabled = True
+        assert await c.update_servers() is True
+        assert sent == ['{"type":"servers","servers":["on","off"]}']
+        assert await c.update_servers() is True and len(sent) == 1  # deduped
+
+    asyncio.run(main())
 
 
 # -- credentials -------------------------------------------------------------

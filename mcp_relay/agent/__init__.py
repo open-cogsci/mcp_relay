@@ -30,11 +30,12 @@ from .credentials import (DEFAULT_STATE_FILE, PairingError, delete_state,
                           load_state, load_state_or_exit, redeem_pairing_code,
                           save_state)
 from .protocol import (FATAL_CLOSE_CODES, MAX_MESSAGE, RESERVED_SERVER_NAMES,
-                       SERVER_NAME_RE, dumps)
-from .servers import (MCPServer, InProcessServerProvider, LocalServer,
-                      LocalServerInstance, OnExit, SendFrame, ServerProvider,
-                      StdioServerProvider, UrlServerProvider, check_providers,
-                      parse_server_spec)
+                       SERVER_NAME_RE, dumps, validate_server_list)
+from .servers import (MCPServer, ArgsProvider, InProcessServerProvider,
+                      LocalServer, LocalServerInstance, OnExit, ProviderBase,
+                      SendFrame, ServerProvider, StdioServerProvider,
+                      UrlServerProvider, call_args_provider, check_providers,
+                      enabled_providers, parse_server_spec)
 
 __version__ = "0.1.0"
 
@@ -42,6 +43,7 @@ __all__ = [
     "DEFAULT_STATE_FILE",
     "FATAL_CLOSE_CODES",
     "Fatal",
+    "ArgsProvider",
     "MCPServer",
     "InProcessServerProvider",
     "LocalServer",
@@ -49,6 +51,7 @@ __all__ = [
     "MAX_MESSAGE",
     "OnExit",
     "PairingError",
+    "ProviderBase",
     "RESERVED_SERVER_NAMES",
     "RelayClient",
     "RelayWidget",
@@ -58,20 +61,24 @@ __all__ = [
     "StdioServerProvider",
     "UrlServerProvider",
     "check_providers",
+    "call_on_gui_thread",
     "delete_state",
     "dumps",
+    "enabled_providers",
     "load_state",
     "load_state_or_exit",
     "parse_server_spec",
     "redeem_pairing_code",
     "save_state",
+    "validate_server_list",
 ]
 
 
 def __getattr__(name: str):
     # Lazy so that `import mcp_relay.agent` does not require Qt (qtpy + a Qt
-    # binding); only touching RelayWidget imports mcp_relay.agent.widget.
-    if name == "RelayWidget":
-        from .widget import RelayWidget
-        return RelayWidget
+    # binding); only touching RelayWidget / call_on_gui_thread imports
+    # mcp_relay.agent.widget.
+    if name in ("RelayWidget", "call_on_gui_thread"):
+        from . import widget
+        return getattr(widget, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

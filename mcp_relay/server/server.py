@@ -51,6 +51,21 @@ MAX_WS_MESSAGE = 32 * 1024 * 1024  # screenshots etc. can be large
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 RESERVED_SERVER_NAMES = {BUILTIN_SERVER}  # served by the relay itself; agents cannot claim them
 
+
+def validate_server_list(servers: object) -> list[str]:
+    """Validate an agent-advertised server list (hello / servers frame).
+
+    Same rule as mcp_relay.agent.protocol.validate_server_list, duplicated here
+    because the relay is deployed standalone (no mcp_relay.agent import).
+    """
+    if (not isinstance(servers, list)
+            or not all(isinstance(n, str) and SERVER_NAME_RE.match(n) for n in servers)
+            or RESERVED_SERVER_NAMES & set(servers)
+            or len(set(servers)) != len(servers)):
+        raise ValueError("invalid server list: expected a list of unique valid server "
+                         f"names (reserved: {sorted(RESERVED_SERVER_NAMES)})")
+    return list(servers)
+
 # WebSocket close codes the relay sends to an agent.  The agent treats all of
 # them as "do not reconnect automatically".
 CLOSE_BAD_HELLO = 4400
@@ -160,10 +175,15 @@ class FailureLimiter:
 
 
 class AgentConn:
-    """One connected desktop agent (WebSocket)."""
+    """One connected desktop agent (WebSocket).
+
+    ``servers`` is the agent's currently advertised server list; it starts as
+    the hello list and can be replaced at runtime by a "servers" frame.
+    """
 
     def __init__(self, ws: WebSocket, user_id: str, device_id: str, servers: list[str]):
-        self.ws, self.user_id, self.device_id, self.servers = ws, user_id, device_id, servers
+        self.ws, self.user_id, self.device_id = ws, user_id, device_id
+        self.servers = list(servers)
         self._lock = asyncio.Lock()
 
     async def send(self, frame: dict) -> None:
@@ -213,14 +233,37 @@ class Hub:
     async def on_agent_frame(self, conn: AgentConn, frame: Any) -> None:
         if not isinstance(frame, dict):
             return
+        kind = frame.get("type")
+        if kind == "servers":
+            # Runtime update of the advertised server list (enable/disable).
+            # Old agents never send this; new agents against an old relay are
+            # fine too (the frame is simply ignored there).
+            try:
+                servers = validate_server_list(frame.get("servers"))
+            except ValueError as exc:
+                log.warning("agent %s sent an invalid 'servers' frame (%s); ignoring", conn.device_id, exc)
+                return
+            await self.update_agent_servers(conn, servers)
+            return
         s = self.sessions.get(frame.get("session"))
         if s is None or s.agent is not conn:  # unknown, or someone else's session
             return
-        kind = frame.get("type")
         if kind == "message" and isinstance(frame.get("data"), dict):
             self._route_to_client(s, frame["data"])
         elif kind == "closed":
             await self.close_session(s, frame.get("reason") or "MCP server process exited", notify_agent=False)
+
+    async def update_agent_servers(self, conn: AgentConn, servers: list[str]) -> None:
+        """Replace an agent's advertised server list.
+
+        Live sessions on servers that are no longer advertised are closed (the
+        agent stops the corresponding local instances on the 'close' frame).
+        """
+        removed = [s for s in self.sessions.values() if s.agent is conn and s.server not in servers]
+        conn.servers = list(servers)
+        log.info("agent %s now advertises servers: %s", conn.device_id, ", ".join(servers) or "(none)")
+        for s in removed:
+            await self.close_session(s, "server disabled on the agent")
 
     def _route_to_client(self, s: Session, msg: dict) -> None:
         s.last_used = time.monotonic()
@@ -281,7 +324,8 @@ class Hub:
             pass
         if notify_agent:
             try:
-                await s.agent.send({"type": "close", "session": s.id})
+                # always tell the agent why: it stops the local server instance
+                await s.agent.send({"type": "close", "session": s.id, "reason": reason[:300]})
             except Exception:
                 pass
 
@@ -521,10 +565,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         await ws.accept()
         try:
             hello = json.loads(await asyncio.wait_for(ws.receive_text(), 10))
-            servers = hello["servers"]
-            if (hello.get("type") != "hello" or not isinstance(servers, list)
-                    or not all(isinstance(n, str) and SERVER_NAME_RE.match(n) for n in servers)
-                    or RESERVED_SERVER_NAMES & set(servers)):
+            servers = validate_server_list(hello.get("servers")) if hello.get("type") == "hello" else None
+            if servers is None:
                 raise ValueError("invalid hello frame")
         except Exception:
             await ws.close(code=CLOSE_BAD_HELLO,

@@ -166,19 +166,10 @@ class BuiltinMCP:
     async def _get_pairing_code(self, user_id: str, args: dict) -> str:
         code, ttl = self.store.create_pairing_code(user_id)  # also voids this user's earlier unused codes
         relay_url = (self.public_url or "<relay URL>").rstrip("/")
-        lines = [
-            f"Pairing code: {code}",
-            f"It is valid for {ttl // 60} minutes and can be used once. Any earlier unused code no longer works.",
-            "",
-            "On the computer you want to connect:",
-            "  1. Enter this code in the desktop agent's pairing box, or run:",
-            f"       python agent.py pair --relay {relay_url} --code {code}",
-            "  2. Keep the desktop agent running.",
-        ]
-        if self.store.list_devices(user_id):
-            lines += ["", "Note: you already have a paired computer. Only one computer can be connected at a "
-                          "time; the agent that was started most recently takes over."]
-        return "\n".join(lines)
+        return f'''Your pairing code is {code}.
+        
+This code allows you to connect a desktop application, such as OpenSesame or Sigmund Analyst, to Sigmund. In the application, activate the Sigmund connector and enter this pairing code. The code is valid for {ttl // 60} minutes and can be used only once.
+'''
 
     async def _list_devices(self, user_id: str, args: dict) -> str:
         devices = sorted(self.store.list_devices(user_id), key=lambda d: d.created_at)

@@ -19,7 +19,7 @@ from typing import Any
 import anyio
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from .base import OnExit, SendFrame, session_message_to_dict, to_session_message
+from .base import OnExit, ProviderBase, SendFrame, call_args_provider, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -27,10 +27,11 @@ log = logging.getLogger("relay-agent")
 class InProcessServerInstance:
     """One in-process MCP server, pumped over anyio memory streams."""
 
-    def __init__(self, server_factory: Callable[[], Any], session_id: str,
-                 send: SendFrame, on_exit: OnExit):
+    def __init__(self, server_factory: Callable[..., Any], session_id: str,
+                 send: SendFrame, on_exit: OnExit, args: tuple = ()):
         self._factory, self.sid = server_factory, session_id
         self._send, self._on_exit = send, on_exit
+        self._args = tuple(args)
         self._stopping = False
         self._to_server_send = None
         self._tasks: list[asyncio.Task] = []
@@ -39,7 +40,7 @@ class InProcessServerInstance:
         # Plain anyio memory streams satisfy the SDK's read/write stream protocols.
         self._to_server_send, to_server_recv = anyio.create_memory_object_stream(100)
         from_server_send, from_server_recv = anyio.create_memory_object_stream(100)
-        server = self._factory()
+        server = self._factory(*self._args)
         lowlevel = getattr(server, "_lowlevel_server", server)  # MCPServer -> low-level Server
         self._tasks = [
             asyncio.create_task(self._run(lowlevel, to_server_recv, from_server_send)),
@@ -93,17 +94,29 @@ class InProcessServerInstance:
         log.info("[%s] in-process MCP server stopped", self.sid[:8])
 
 
-class InProcessServerProvider:
-    """Expose an in-process MCP server under a server name."""
+class InProcessServerProvider(ProviderBase):
+    """Expose an in-process MCP server under a server name.
 
-    def __init__(self, name: str, server_factory: Callable[[], Any]):
+    ``server_factory`` is called once per session as ``factory(*args)``, where
+    ``args`` is the (possibly empty) tuple returned by ``args_provider`` when
+    the session is opened -- e.g. ``make_server(root_dir)``. Zero-argument
+    factories keep working when no ``args_provider`` is set.
+    """
+
+    def __init__(self, name: str, server_factory: Callable[..., Any], *,
+                 display_name: str | None = None, enabled: bool = True,
+                 args_provider=None):
         if not SERVER_NAME_RE.match(name) or name in RESERVED_SERVER_NAMES:
             raise ValueError(f"Invalid or reserved server name: {name!r}")
-        self._name, self._factory = name, server_factory
-
-    @property
-    def name(self) -> str:
-        return self._name
+        super().__init__(name, display_name, enabled, args_provider)
+        self._factory = server_factory
 
     def create(self, session_id: str, send: SendFrame, on_exit: OnExit) -> InProcessServerInstance:
-        return InProcessServerInstance(self._factory, session_id, send, on_exit)
+        args = call_args_provider(self)
+        if args is None:
+            args = ()
+        elif isinstance(args, (list, tuple)):
+            args = tuple(args)
+        else:
+            args = (args,)
+        return InProcessServerInstance(self._factory, session_id, send, on_exit, args)

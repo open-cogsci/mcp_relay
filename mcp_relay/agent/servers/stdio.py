@@ -14,7 +14,7 @@ import shlex
 import shutil
 
 from ..protocol import MAX_MESSAGE, RESERVED_SERVER_NAMES, SERVER_NAME_RE, dumps
-from .base import OnExit, SendFrame
+from .base import OnExit, ProviderBase, SendFrame, call_args_provider
 
 log = logging.getLogger("relay-agent")
 
@@ -113,24 +113,44 @@ class LocalServer:
         log.info("[%s] stopped %s", self.sid[:8], self.name)
 
 
-class StdioServerProvider:
-    """Expose a stdio command under a server name."""
+class StdioServerProvider(ProviderBase):
+    """Expose a stdio command under a server name.
 
-    def __init__(self, name: str, argv: list[str]):
+    ``argv`` is the base command. When ``args_provider`` is given it is called
+    every time a session is opened (on the agent's asyncio thread) and the
+    returned list of strings (or a single string) is *appended* to ``argv`` --
+    e.g. ``mcp-server-filesystem <root>`` where ``<root>`` comes from a
+    folder-selection dialog. Returning ``None``/``[]`` uses ``argv`` as is;
+    raising (e.g. the user cancelled the dialog) fails just that session.
+    """
+
+    def __init__(self, name: str, argv: list[str], *, display_name: str | None = None,
+                 enabled: bool = True, args_provider=None):
         if not SERVER_NAME_RE.match(name) or name in RESERVED_SERVER_NAMES:
             raise ValueError(f"Invalid or reserved server name: {name!r}")
-        self._name, self._argv = name, list(argv)
-
-    @property
-    def name(self) -> str:
-        return self._name
+        super().__init__(name, display_name, enabled, args_provider)
+        self._argv = list(argv)
 
     @property
     def argv(self) -> list[str]:
+        """The base command, without any args_provider-supplied arguments."""
         return list(self._argv)
 
     def create(self, session_id: str, send: SendFrame, on_exit: OnExit) -> LocalServer:
-        return LocalServer(self._name, self._argv, session_id, send, on_exit)
+        argv = self._argv + self._resolve_args()
+        return LocalServer(self._name, argv, session_id, send, on_exit)
+
+    def _resolve_args(self) -> list[str]:
+        extra = call_args_provider(self)
+        if extra is None:
+            return []
+        if isinstance(extra, str):
+            return [extra]
+        if isinstance(extra, (list, tuple)) and all(isinstance(a, str) for a in extra):
+            return [str(a) for a in extra]
+        raise TypeError(
+            f"args_provider for server {self._name!r} must return None, a string or a "
+            f"list of strings, got {type(extra).__name__}")
 
 
 def parse_server_spec(spec: str) -> tuple[str, list[str]]:

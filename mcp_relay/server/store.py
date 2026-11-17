@@ -57,6 +57,7 @@ class Store:
     def __init__(self, path: str = DEFAULT_DB):
         # The relay is a single asyncio process and these queries are tiny, so
         # synchronous sqlite calls are fine for ~100s of users.
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False,
                                    isolation_level=None)

@@ -26,7 +26,7 @@ import httpx2
 from mcp.client.streamable_http import streamable_http_client
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from .base import OnExit, SendFrame, session_message_to_dict, to_session_message
+from .base import OnExit, ProviderBase, SendFrame, call_args_provider, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -39,7 +39,7 @@ class UrlServerInstance:
 
     def __init__(self, url: str, headers: dict | None, session_id: str,
                  send: SendFrame, on_exit: OnExit):
-        self.url, self.headers, self.sid = url, headers, session_id
+        self.url, self.headers, self.sid = url, headers or {}, session_id
         self._send, self._on_exit = send, on_exit
         self._stopping = False
         self._to_remote: asyncio.Queue | None = None  # relay -> remote messages
@@ -165,23 +165,41 @@ class UrlServerInstance:
         log.info("[%s] stopped proxy to %s", self.sid[:8], self.url)
 
 
-class UrlServerProvider:
-    """Expose a remote streamable-HTTP MCP server under a server name."""
+class UrlServerProvider(ProviderBase):
+    """Expose a remote streamable-HTTP MCP server under a server name.
 
-    def __init__(self, name: str, url: str, headers: dict | None = None):
+    When ``args_provider`` is set it is called per session: a returned list of
+    strings is appended to the URL as path segments (e.g. ``/mcp/<name>/team``)
+    and a returned dict is merged into the request headers. Returning ``None``
+    uses the base URL and headers unchanged.
+    """
+
+    def __init__(self, name: str, url: str, headers: dict | None = None, *,
+                 display_name: str | None = None, enabled: bool = True,
+                 args_provider=None):
         if not SERVER_NAME_RE.match(name) or name in RESERVED_SERVER_NAMES:
             raise ValueError(f"Invalid or reserved server name: {name!r}")
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"url must be http(s)://, got {url!r}")
-        self._name, self._url, self._headers = name, url, dict(headers or {})
-
-    @property
-    def name(self) -> str:
-        return self._name
+        super().__init__(name, display_name, enabled, args_provider)
+        self._url, self._headers = url, dict(headers or {})
 
     @property
     def url(self) -> str:
+        """The base URL, without any args_provider-supplied path segments."""
         return self._url
 
     def create(self, session_id: str, send: SendFrame, on_exit: OnExit) -> UrlServerInstance:
-        return UrlServerInstance(self._url, self._headers, session_id, send, on_exit)
+        url, headers = self._url, dict(self._headers)
+        extra = call_args_provider(self)
+        if extra is not None:
+            if isinstance(extra, dict):
+                headers.update(extra)
+            else:
+                segments = [extra] if isinstance(extra, str) else list(extra)
+                if not all(isinstance(s, str) for s in segments):
+                    raise TypeError(
+                        f"args_provider for server {self._name!r} must return None, a dict "
+                        f"(headers) or URL path segments, got {type(extra).__name__}")
+                url = self._url.rstrip("/") + "/" + "/".join(s.strip("/") for s in segments)
+        return UrlServerInstance(url, headers, session_id, send, on_exit)

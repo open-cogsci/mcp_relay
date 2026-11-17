@@ -11,6 +11,18 @@ For 'remote' the example self-hosts a demo MCP server over streamable HTTP on a
 local port (see start_demo_remote_server), so the example works out of the box.
 Use --remote-url to point at any other streamable-HTTP MCP endpoint instead.
 
+The example also demonstrates the flexible server configuration:
+
+* every provider has a human-readable ``display_name`` shown on its toggle
+  button (the protocol name stays in the tooltip),
+* ``files`` starts out disabled (``enabled=False``) and can be toggled on in
+  the GUI at any time -- while connected the new set is pushed to the relay
+  in a "servers" frame, otherwise it applies on the next connect,
+* ``files`` takes its root directory from an ``args_provider``: when a session
+  for it opens, a folder-selection dialog appears (marshaled to the GUI thread
+  via ``widget.call_on_gui_thread``) and the chosen path is appended to the
+  stdio command.
+
 Usage:
 
   1. Run the relay somewhere reachable:  python server.py --host 0.0.0.0 --port 8080
@@ -18,7 +30,7 @@ Usage:
   3. python example_qt_app.py --relay http://localhost:8080 --fs-root .
      Enter the code in the widget and press Connect.
 
-LibreChat (or any MCP client) can then reach all three servers through the
+LibreChat (or any MCP client) can then reach the enabled servers through the
 relay at /mcp/hello, /mcp/files and /mcp/remote.
 """
 
@@ -29,7 +41,8 @@ import threading
 from pathlib import Path
 
 from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayWidget,
-                             StdioServerProvider, UrlServerProvider)
+                             StdioServerProvider, UrlServerProvider,
+                             call_on_gui_thread)
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -74,7 +87,8 @@ def main() -> None:
     p.add_argument("--state-file", default=None,
                    help="credential file (default: ~/.config/mcp-relay-agent/credentials.json)")
     p.add_argument("--fs-root", default=os.getcwd(),
-                   help="directory the 'files' stdio server may access")
+                   help="default directory for the 'files' server; can be changed per "
+                        "session through the folder dialog")
     p.add_argument("--remote-url", default=None,
                    help="streamable-HTTP MCP endpoint exposed as 'remote' "
                         "(default: self-hosted demo server on --demo-port)")
@@ -89,23 +103,44 @@ def main() -> None:
 
     fs_bin = REPO_DIR / "node_modules" / ".bin" / "mcp-server-filesystem"
     if fs_bin.exists():
-        files_argv = [str(fs_bin), os.path.abspath(args.fs_root)]
+        files_argv = [str(fs_bin)]
     else:
-        files_argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem",
-                      os.path.abspath(args.fs_root)]
+        files_argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem"]
 
-    providers = {
-        "hello": InProcessServerProvider("hello", make_hello_server),
-        "files": StdioServerProvider("files", files_argv),
-        "remote": UrlServerProvider("remote", remote_url),
-    }
-
-    from qtpy.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication, QFileDialog
 
     app = QApplication(sys.argv)
     kwargs = {}
     if args.state_file:
         kwargs["state_file"] = args.state_file
+
+    def pick_fs_root() -> str:
+        """Ask the user which folder the 'files' server may access.
+
+        Runs on the GUI thread: the args_provider below is invoked on the
+        agent's asyncio thread when a session opens, and call_on_gui_thread
+        marshals the dialog there. Raising here fails just that one session
+        with a 'closed' frame.
+        """
+        path = QFileDialog.getExistingDirectory(
+            None, "Choose the folder the 'files' MCP server may access",
+            args.fs_root)
+        if not path:
+            raise RuntimeError("no folder selected; cancelling this session")
+        return path
+
+    providers = {
+        "hello": InProcessServerProvider("hello", make_hello_server,
+                                         display_name="Hello (in-process)"),
+        # The filesystem server needs a root path, supplied per session by the
+        # folder dialog above; it starts out disabled and can be toggled on.
+        "files": StdioServerProvider(
+            "files", files_argv, display_name="Files (folder)", enabled=True,
+            args_provider=lambda: call_on_gui_thread(pick_fs_root)),
+        "remote": UrlServerProvider("remote", remote_url,
+                                    display_name="Remote (HTTP passthrough)"),
+    }
+
     # The relay URL comes from the command line; the widget never asks for it.
     widget = RelayWidget(relay_url=args.relay, providers=providers, **kwargs)
     widget.setWindowTitle("MCP relay agent — three server kinds")

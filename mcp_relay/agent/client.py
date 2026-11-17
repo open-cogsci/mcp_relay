@@ -22,8 +22,8 @@ from collections.abc import Callable
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .protocol import FATAL_CLOSE_CODES, MAX_MESSAGE, dumps
-from .servers import ServerProvider, check_providers
+from .protocol import FATAL_CLOSE_CODES, MAX_MESSAGE, dumps, validate_server_list
+from .servers import ServerProvider, check_providers, enabled_providers
 
 log = logging.getLogger("relay-agent")
 
@@ -44,10 +44,37 @@ class RelayClient:
         self._background: set[asyncio.Task] = set()
         self._stop_event: asyncio.Event | None = None
         self._ws = None
+        self._servers_lock = asyncio.Lock()  # guards _advertised vs the ws send
+        self._advertised: list[str] | None = None  # last server list sent to the relay
 
     @property
     def server_names(self) -> list[str]:
-        return list(self.providers)
+        """Names of the currently *enabled* providers, in registration order."""
+        return list(enabled_providers(self.providers))
+
+    def enabled_server_names(self) -> list[str]:
+        """Alias for server_names (the advertised list is always the enabled subset)."""
+        return self.server_names
+
+    async def update_servers(self) -> bool:
+        """Advertise the current enabled-server set to the relay ("servers" frame).
+
+        Returns True if the frame was sent, False when not connected (in that
+        case the next hello carries the current set anyway). Safe to call from
+        any thread via asyncio.run_coroutine_threadsafe on the client's loop.
+        Relays that predate the "servers" frame ignore it.
+        """
+        names = self.server_names
+        ws = self._ws
+        if ws is None:
+            return False
+        async with self._servers_lock:
+            if names == self._advertised:
+                return True  # nothing changed since the last advertisement
+            await ws.send(dumps({"type": "servers", "servers": names}))
+            self._advertised = names
+        log.info("advertised servers to relay: %s", ", ".join(names) or "(none)")
+        return True
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -110,7 +137,10 @@ class RelayClient:
         ) as ws:
             self._ws = ws
             try:
-                await ws.send(dumps({"type": "hello", "servers": self.server_names}))
+                names = self.server_names
+                validate_server_list(names)  # fail fast on a bad registry, before hello
+                await ws.send(dumps({"type": "hello", "servers": names}))
+                self._advertised = names
                 welcome = json.loads(await asyncio.wait_for(ws.recv(), 10))
                 if welcome.get("type") != "welcome":
                     raise ConnectionError(f"unexpected reply from relay: {welcome}")
@@ -144,15 +174,22 @@ class RelayClient:
             await ws.send(dumps(f))
 
         if kind == "open":
-            provider = self.providers.get(frame.get("server"))
-            if provider is None:
+            name = frame.get("server")
+            provider = self.providers.get(name)
+            if provider is None or not getattr(provider, "enabled", True):
                 await send({"type": "closed", "session": sid,
-                            "reason": f"unknown server {frame.get('server')!r}"})
+                            "reason": f"server {name!r} is not enabled on this agent"})
                 return
-            instance = provider.create(sid, send, on_exit=lambda s: self.sessions.pop(s, None))
             try:
+                # create() may run an args_provider, which can block for a long
+                # time (e.g. a GUI folder dialog marshaled to the GUI thread);
+                # run it in a worker thread so this asyncio loop keeps serving
+                # pings, other frames and update_servers() meanwhile.
+                instance = await asyncio.to_thread(
+                    provider.create, sid, send, lambda s: self.sessions.pop(s, None))
                 await instance.start()  # started before the next frame (the 'initialize') is handled
             except Exception as exc:
+                log.warning("[%s] could not start server %r: %s", str(sid)[:8], name, exc)
                 await send({"type": "closed", "session": sid, "reason": f"could not start server: {exc}"})
                 return
             self.sessions[sid] = instance
