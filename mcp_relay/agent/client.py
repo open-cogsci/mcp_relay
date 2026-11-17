@@ -181,10 +181,14 @@ class RelayClient:
                             "reason": f"server {name!r} is not enabled on this agent"})
                 return
             try:
-                # create() may run an args_provider, which can block for a long
-                # time (e.g. a GUI folder dialog marshaled to the GUI thread);
-                # run it in a worker thread so this asyncio loop keeps serving
-                # pings, other frames and update_servers() meanwhile.
+                # create() normally just reuses the arguments resolved when the
+                # provider was enabled (ProviderBase.resolve_args); it may only
+                # call args_provider itself for providers that were never
+                # enabled through the setter (e.g. a CLI-built provider). That
+                # callable can block for a long time (e.g. a GUI folder dialog
+                # marshaled via call_on_gui_thread), so run create() in a
+                # worker thread: this asyncio loop keeps serving pings, other
+                # frames and update_servers() meanwhile.
                 instance = await asyncio.to_thread(
                     provider.create, sid, send, lambda s: self.sessions.pop(s, None))
                 await instance.start()  # started before the next frame (the 'initialize') is handled

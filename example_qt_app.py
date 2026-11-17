@@ -15,20 +15,20 @@ The example also demonstrates the flexible server configuration:
 
 * every provider has a human-readable ``display_name`` shown on its toggle
   button (the protocol name stays in the tooltip),
-* ``files`` starts out disabled (``enabled=False``) and can be toggled on in
-  the GUI at any time -- while connected the new set is pushed to the relay
-  in a "servers" frame, otherwise it applies on the next connect,
-* ``files`` takes its root directory from an ``args_provider``: when a session
-  for it opens, a folder-selection dialog appears (marshaled to the GUI thread
-  via ``widget.call_on_gui_thread``) and the chosen path is appended to the
-  stdio command.
+* ``files`` takes its root directory from an ``args_provider``: when the
+  server is *enabled* (at startup, or when its toggle button is switched on),
+  a folder-selection dialog appears and the chosen path is appended to the
+  stdio command. Disabling and re-enabling the server asks for the folder
+  anew. While connected the enabled set is pushed to the relay in a
+  "servers" frame, otherwise it applies on the next connect,
 
 Usage:
 
   1. Run the relay somewhere reachable:  python server.py --host 0.0.0.0 --port 8080
   2. Get a pairing code (chat tool get_pairing_code on /mcp/relay).
   3. python example_qt_app.py --relay http://localhost:8080 --fs-root .
-     Enter the code in the widget and press Connect.
+     Enter the code in the widget and press Connect. Enabling the 'files'
+     toggle pops the folder dialog right away.
 
 LibreChat (or any MCP client) can then reach the enabled servers through the
 relay at /mcp/hello, /mcp/files and /mcp/remote.
@@ -41,8 +41,7 @@ import threading
 from pathlib import Path
 
 from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayWidget,
-                             StdioServerProvider, UrlServerProvider,
-                             call_on_gui_thread)
+                             StdioServerProvider, UrlServerProvider)
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -117,26 +116,28 @@ def main() -> None:
     def pick_fs_root() -> str:
         """Ask the user which folder the 'files' server may access.
 
-        Runs on the GUI thread: the args_provider below is invoked on the
-        agent's asyncio thread when a session opens, and call_on_gui_thread
-        marshals the dialog there. Raising here fails just that one session
-        with a 'closed' frame.
+        Runs on the GUI thread: the args_provider below is invoked when the
+        server is enabled (at widget startup, or when its toggle is switched
+        on), and enabling happens on the GUI thread, so the dialog can be
+        shown directly. Raising here (cancel) leaves the server disabled.
         """
         path = QFileDialog.getExistingDirectory(
             None, "Choose the folder the 'files' MCP server may access",
             args.fs_root)
         if not path:
-            raise RuntimeError("no folder selected; cancelling this session")
+            raise RuntimeError("no folder selected; server not enabled")
         return path
 
     providers = {
         "hello": InProcessServerProvider("hello", make_hello_server,
                                          display_name="Hello (in-process)"),
-        # The filesystem server needs a root path, supplied per session by the
-        # folder dialog above; it starts out disabled and can be toggled on.
+        # The filesystem server needs a root path, supplied by the folder
+        # dialog above whenever the server is enabled. It starts out
+        # disabled; switching its toggle on asks for the folder (and every
+        # later re-enable asks anew).
         "files": StdioServerProvider(
-            "files", files_argv, display_name="Files (folder)", enabled=True,
-            args_provider=lambda: call_on_gui_thread(pick_fs_root)),
+            "files", files_argv, display_name="Files (folder)", enabled=False,
+            args_provider=pick_fs_root),
         "remote": UrlServerProvider("remote", remote_url,
                                     display_name="Remote (HTTP passthrough)"),
     }

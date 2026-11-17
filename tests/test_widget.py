@@ -67,6 +67,100 @@ def test_toggling_updates_provider_and_emits(widget):
         widget.set_server_enabled("nope", True)
 
 
+def test_args_provider_runs_on_enable_and_asks_anew_on_reenable(qapp, tmp_path):
+    """args_provider must run when the server is enabled -- at widget init for
+    initially-enabled servers and on every later (re-)enable -- not per session."""
+    calls = []
+
+    def args():
+        calls.append(f"/root-{len(calls)}")
+        return calls[-1]
+
+    providers = {
+        "files": StdioServerProvider("files", ["cmd"], display_name="Files",
+                                     enabled=False, args_provider=args),
+        "auto": StdioServerProvider("auto", ["cmd"], args_provider=args),
+    }
+    assert calls == []  # constructing with enabled=True does not ask yet
+    w = RelayWidget(relay_url="http://relay.test", providers=providers,
+                    state_file=tmp_path / "creds.json", auto_connect=False)
+    try:
+        # 'auto' starts enabled -> the widget asked at initialization
+        assert calls == ["/root-0"]
+        assert w._providers["auto"].enabled is True
+        assert w._providers["files"].enabled is False
+        assert w.enabled_servers() == ["auto"]
+        # enabling 'files' through the GUI asks anew
+        w._toggle_buttons["files"].setChecked(True)
+        assert calls == ["/root-0", "/root-1"]
+        assert w.enabled_servers() == ["files", "auto"]
+        # sessions reuse the cached args (create() does not re-ask)
+        inst = w._providers["files"].create("s", None, lambda s: None)
+        assert inst.argv == ["cmd", "/root-1"]
+        assert len(calls) == 2
+        # disable + re-enable asks anew
+        w.set_server_enabled("files", False)
+        w.set_server_enabled("files", True)
+        assert calls == ["/root-0", "/root-1", "/root-2"]
+        assert w._providers["files"].create("s2", None, lambda s: None).argv == ["cmd", "/root-2"]
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+def test_cancelled_args_dialog_at_startup_leaves_server_disabled(qapp, tmp_path):
+    """A provider that starts enabled but whose args_provider raises (e.g. the
+    user cancels the folder dialog) must not crash the widget: the server just
+    stays disabled and its toggle is unchecked."""
+
+    def boom():
+        raise RuntimeError("user cancelled")
+
+    providers = {
+        "files": StdioServerProvider("files", ["cmd"], enabled=True, args_provider=boom),
+        "hello": InProcessServerProvider("hello", lambda: None),
+    }
+    w = RelayWidget(relay_url="http://relay.test", providers=providers,
+                    state_file=tmp_path / "creds.json", auto_connect=False)
+    try:
+        assert w._providers["files"].enabled is False
+        assert not w._toggle_buttons["files"].isChecked()
+        assert w.enabled_servers() == ["hello"]
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+def test_cancelled_args_dialog_on_toggle_unchecks_button(qapp, tmp_path):
+    """Same, but when enabling through the GUI at runtime: the toggle snaps
+    back off and the server stays disabled."""
+    state = {"n": 0}
+
+    def args():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("user cancelled")
+        return f"/root-{state['n']}"
+
+    providers = {"files": StdioServerProvider("files", ["cmd"], enabled=False,
+                                              args_provider=args)}
+    w = RelayWidget(relay_url="http://relay.test", providers=providers,
+                    state_file=tmp_path / "creds.json", auto_connect=False)
+    try:
+        w._toggle_buttons["files"].setChecked(True)  # dialog cancelled
+        assert w._providers["files"].enabled is False
+        assert not w._toggle_buttons["files"].isChecked()
+        assert w.enabled_servers() == []
+        w._toggle_buttons["files"].setChecked(True)  # retry: asks anew, succeeds
+        assert w._providers["files"].enabled is True
+        assert w._toggle_buttons["files"].isChecked()
+        assert w.enabled_servers() == ["files"]
+        assert state["n"] == 2
+    finally:
+        w.close()
+        w.deleteLater()
+
+
 def test_call_on_gui_thread_roundtrip(qapp):
     """A worker thread must be able to run a callable on the GUI thread and get
     its result/exception back -- this is what args_provider dialogs need.
@@ -117,6 +211,5 @@ def test_call_on_gui_thread_roundtrip(qapp):
     pump_while_alive(t2)
     assert any("cancelled" in str(e) for e in errors)
 
-    # calling from the GUI thread itself must raise, not deadlock
-    with pytest.raises(RuntimeError, match="GUI thread"):
-        call_on_gui_thread(lambda: None)
+    # calling from the GUI thread itself runs inline (no marshal needed)
+    assert call_on_gui_thread(lambda: "inline-ok") == "inline-ok"

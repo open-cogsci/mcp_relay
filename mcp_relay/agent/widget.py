@@ -13,12 +13,16 @@ e.g. from a command-line flag); the user never sees or edits it.
 Each provider may carry optional metadata that drives this widget (see
 ``mcp_relay.agent.servers``): ``display_name`` (human-readable label on the
 toggle button; the protocol name goes to the tooltip), ``enabled`` (initial
-toggle state; default True) and ``args_provider`` (callable invoked when a
-session for that server starts, e.g. to pop a folder-selection dialog; use
-``widget.call_on_gui_thread(fn)`` inside it, because it runs on the agent
-thread). The toggle buttons let the user enable/disable servers at runtime;
-while connected the new set is sent to the relay in a "servers" frame,
-otherwise it applies on the next connect.
+toggle state; default True) and ``args_provider`` (callable invoked when the
+server is *enabled* -- at widget initialization for servers that start
+enabled, and anew on every later enable, e.g. to pop a folder-selection
+dialog). The resolved arguments are cached and reused for every session until
+the server is disabled again. Enabling happens on the GUI thread, so an
+``args_provider`` may show a Qt dialog directly; use
+``call_on_gui_thread(fn)`` only if it might run on another thread (it runs
+``fn`` inline when already on the GUI thread). The toggle buttons let the
+user enable/disable servers at runtime; while connected the new set is sent
+to the relay in a "servers" frame, otherwise it applies on the next connect.
 
 The agent runs on its own QThread with its own asyncio loop; all cross-thread
 communication goes through Qt signals, so the widget is safe to use from the
@@ -40,7 +44,7 @@ User-facing state machine (see ``RelayWidget.state`` / ``state_changed``)::
 
 The three primary user states are DISCONNECTED / NEEDS_PAIRING / CONNECTED.
 """
-
+import os
 import asyncio
 import logging
 import queue
@@ -51,6 +55,7 @@ from pathlib import Path
 from qtpy.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
 from qtpy.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                             QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
+from qtpy.QtGui import QPixmap
 
 from .client import Fatal, RelayClient
 from .credentials import (DEFAULT_STATE_FILE, PairingError, delete_state,
@@ -120,23 +125,23 @@ def _gui_dispatcher() -> _GuiDispatcher:
 def call_on_gui_thread(fn):
     """Run ``fn()`` on the GUI thread and block the calling thread until it returns.
 
-    ``args_provider`` callables run on the agent's asyncio thread when a
-    session opens, so a provider that needs a Qt dialog (e.g. choosing the
-    filesystem root) should use this, e.g.::
+    ``args_provider`` callables run when a server is enabled -- usually on the
+    GUI thread already (from the widget's toggle buttons), in which case this
+    helper simply calls ``fn()`` inline. When called from a non-GUI thread (a
+    CLI agent, or the agent's asyncio thread via ``create()``), the callable is
+    marshaled to the GUI thread through the process-wide dispatcher::
 
         StdioServerProvider("files", [fs_bin], args_provider=lambda: call_on_gui_thread(pick_folder))
 
     Works even before/without a RelayWidget, as long as a QApplication exists.
     Returns ``fn``'s result in the calling thread; re-raises whatever ``fn``
-    raises there (e.g. "user cancelled"), which fails just that one session
-    with a "closed" frame. Must not be called from the GUI thread itself
-    (that would deadlock).
+    raises there (e.g. "user cancelled"), which fails the enable / session.
     """
     app = QApplication.instance()
     if app is None:
         raise RuntimeError("call_on_gui_thread() needs a QApplication instance")
     if QThread.currentThread() is app.thread():
-        raise RuntimeError("call_on_gui_thread() must not be called from the GUI thread")
+        return fn()  # already on the GUI thread: just run it
     dispatcher = _gui_dispatcher()  # created on/moved to the GUI thread; emit is queued
     result: dict = {}
     done = threading.Event()
@@ -265,6 +270,13 @@ class RelayWidget(QWidget):
     def _build_ui(self) -> None:
         self.setWindowTitle("MCP relay")
         layout = QVBoxLayout(self)
+        
+        pix_label = QLabel()
+        pix_label.setAlignment(Qt.AlignCenter)
+        pixmap = QPixmap(os.path.join(os.path.dirname(__file__),
+                                      'sigmund-full.png'))
+        pix_label.setPixmap(pixmap)
+        layout.addWidget(pix_label)                
 
         # One toggle button per available MCP server. The button shows the
         # human-readable display_name (protocol name in the tooltip) and its
@@ -281,16 +293,28 @@ class RelayWidget(QWidget):
             btn.setChecked(bool(getattr(provider, "enabled", True)))
             tooltip = f"Protocol name: {name}"
             if getattr(provider, "args_provider", None) is not None:
-                tooltip += "\nRequires arguments when started (asked per session)"
+                tooltip += "\nStart arguments are requested when you enable this server"
             btn.setToolTip(tooltip)
             btn.toggled.connect(lambda checked, n=name: self._on_server_toggled(n, checked))
             self._toggle_buttons[name] = btn
             servers_row.addWidget(btn)
-        servers_row.addStretch(1)
+        # Servers that start enabled must ask for their start arguments now,
+        # at initialization, on this (GUI) thread. If that fails (e.g. the
+        # user cancels a folder dialog), the server simply stays disabled and
+        # the toggle reflects that -- the app must not crash at startup.
+        for name, provider in self._providers.items():
+            if getattr(provider, "enabled", True):
+                try:
+                    provider.enabled = True  # asks args_provider (ProviderBase)
+                except Exception as exc:
+                    log.warning("server %r could not be enabled at startup: %s", name, exc)
+                    self._set_provider_flag(provider, False)
+                    btn = self._toggle_buttons[name]
+                    btn.blockSignals(True)  # no toggled handler while the UI is still building
+                    btn.setChecked(False)
+                    btn.blockSignals(False)
         layout.addWidget(self._servers_container)
-        
-        layout.addStretch()
-
+    
         self._status_label = QLabel()
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
@@ -321,6 +345,7 @@ class RelayWidget(QWidget):
         btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._action_btn)
         layout.addLayout(btn_row)        
+        layout.addStretch()
 
     def _status_text(self) -> str:
         if self._state == "connected":
@@ -385,10 +410,30 @@ class RelayWidget(QWidget):
         self._toggle_buttons[name].setChecked(bool(enabled))  # fires _on_server_toggled
 
     def _on_server_toggled(self, name: str, checked: bool) -> None:
-        setattr(self._providers[name], "enabled", bool(checked))
+        provider = self._providers[name]
+        try:
+            # ProviderBase.enabled resolves the start arguments when enabling
+            # (each enable asks anew) and raises -- leaving the flag unchanged
+            # -- when e.g. the user cancels the folder dialog.
+            provider.enabled = bool(checked)
+        except Exception as exc:
+            log.info("server %r was not enabled: %s", name, exc)
+            self._set_provider_flag(provider, False)
+            btn = self._toggle_buttons[name]
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
         self._notify_servers_changed()
         self._refresh()
         self.servers_changed.emit(self.enabled_servers())
+
+    @staticmethod
+    def _set_provider_flag(provider, value: bool) -> None:
+        """Set the raw flag without asking for args (used when an enable failed)."""
+        if hasattr(provider, "_enabled"):
+            provider._enabled = bool(value)
+        else:
+            provider.enabled = bool(value)  # plain provider object: no args to ask
 
     def _notify_servers_changed(self) -> None:
         """Push the new enabled-set to the relay if the agent is connected.
@@ -408,15 +453,15 @@ class RelayWidget(QWidget):
     def call_on_gui_thread(self, fn):
         """Widget-bound alias of the module-level :func:`call_on_gui_thread`.
 
-        ``args_provider`` callables run on the agent's asyncio thread when a
-        session opens, so a provider that needs a Qt dialog (e.g. choosing
-        the filesystem root) should do::
+        ``args_provider`` callables now usually run on the GUI thread (when a
+        server is enabled), in which case you can show a Qt dialog directly;
+        this helper is for the case where the callable runs on another thread
+        (e.g. a CLI agent), e.g.::
 
-            args_provider=lambda: widget.call_on_gui_thread(pick_folder_dialog)
+            args_provider=lambda: call_on_gui_thread(pick_folder_dialog)
 
-        or, without a widget reference, the module-level function. Raises
-        whatever ``fn`` raises in the calling thread; the session then fails
-        cleanly with a "closed" frame. Must not be called from the GUI thread.
+        On the GUI thread it just calls ``fn()`` inline. Raises whatever ``fn``
+        raises; a failed enable leaves the server disabled.
         """
         return call_on_gui_thread(fn)
 

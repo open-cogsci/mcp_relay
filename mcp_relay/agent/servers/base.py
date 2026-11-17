@@ -16,9 +16,11 @@ drive the agent GUI (see ``mcp_relay.agent.widget.RelayWidget``):
   client only advertises enabled providers and sends a "servers" frame when
   the set changes, so this can be toggled at runtime.
 * ``args_provider`` -- optional zero-argument callable returning start
-  arguments for the server (see :func:`call_args_provider`). Called from the
-  agent's asyncio thread when a session is opened, i.e. *not* necessarily
-  from the GUI thread.
+  arguments for the server (see :func:`call_args_provider`). It is called
+  when the provider is *enabled* -- at widget initialization for servers that
+  start enabled, and anew every time a server is enabled afterwards -- and
+  the result is cached and reused for every session until the provider is
+  disabled again (see :meth:`ProviderBase.resolve_args`).
 """
 
 from collections.abc import Awaitable, Callable
@@ -47,16 +49,22 @@ def session_message_to_dict(sm: SessionMessage) -> dict:
 def call_args_provider(provider: Any) -> Any:
     """Call a provider's optional ``args_provider`` and return its result.
 
-    Runs wherever the caller runs (the agent's asyncio thread when a session
-    opens); a provider whose arguments need GUI interaction must marshal the
-    call to the GUI thread itself (the widget provides a helper for that).
-    Raises whatever the callable raises -- callers turn that into a failed
-    session (a "closed" frame), never a crashed agent.
+    Called by :meth:`ProviderBase.resolve_args` when the provider is enabled
+    (which may happen on the GUI thread, e.g. from the widget's toggle
+    buttons). A provider whose arguments need GUI interaction can simply show
+    a Qt dialog; use ``mcp_relay.agent.call_on_gui_thread`` only when the
+    callable might run on a non-GUI thread (it runs inline on the GUI
+    thread). Raises whatever the callable raises -- the enable then fails and
+    the provider stays disabled, and the client turns a late failure into a
+    failed session (a "closed" frame), never a crashed agent.
     """
     fn = getattr(provider, "args_provider", None)
     if fn is None:
         return None
     return fn()
+
+
+_UNRESOLVED = object()  # sentinel: start args not asked yet (None is a valid answer)
 
 
 class ProviderBase:
@@ -66,14 +74,21 @@ class ProviderBase:
     ``enabled`` flag (default True) and the optional ``args_provider``
     callable. The three concrete providers inherit from this so the widget
     can treat them uniformly via getattr().
+
+    Setting ``enabled = True`` asks for the start arguments synchronously in
+    the caller's thread (see :meth:`resolve_args`) and may raise -- e.g. when
+    the user cancels a dialog; the flag is then left unchanged, so a failed
+    enable keeps the server disabled. Setting ``enabled = False`` invalidates
+    the cached arguments, so the next enable asks anew.
     """
 
     def __init__(self, name: str, display_name: str | None = None,
                  enabled: bool = True, args_provider: ArgsProvider | None = None):
         self._name = name
         self._display_name = display_name or name
-        self._enabled = bool(enabled)
         self._args_provider = args_provider
+        self._resolved_args = _UNRESOLVED
+        self._enabled = bool(enabled)  # direct assignment: construction never asks for args
 
     @property
     def name(self) -> str:
@@ -91,11 +106,37 @@ class ProviderBase:
 
     @enabled.setter
     def enabled(self, value: bool) -> None:
-        self._enabled = bool(value)
+        value = bool(value)
+        if value:
+            # Ask for the start arguments now; each enable asks anew. If this
+            # raises, the flag is left unchanged: the server stays disabled.
+            self.resolve_args()
+            self._enabled = True
+        else:
+            self._enabled = False
+            self.invalidate_args()
 
     @property
     def args_provider(self) -> ArgsProvider | None:
         return self._args_provider
+
+    def resolve_args(self) -> Any:
+        """Return the start arguments, calling ``args_provider`` once if they
+        were not resolved yet (or were invalidated by a disable).
+
+        Called automatically when the provider is enabled. ``create()`` also
+        calls this as a fallback for providers that were never enabled through
+        the setter (e.g. a CLI-built provider constructed with ``enabled=True``),
+        in which case the callable runs on the agent thread.
+        """
+        if self._resolved_args is _UNRESOLVED:
+            self._resolved_args = call_args_provider(self)
+        return self._resolved_args
+
+    def invalidate_args(self) -> None:
+        """Drop the cached start arguments; the next :meth:`resolve_args` (or
+        enable) asks the ``args_provider`` anew."""
+        self._resolved_args = _UNRESOLVED
 
 
 class LocalServerInstance(Protocol):
@@ -114,8 +155,10 @@ class ServerProvider(Protocol):
     """Factory for per-session instances, advertised under ``name``.
 
     Optional attributes (checked with getattr, so plain provider objects
-    without them keep working): ``display_name: str``, ``enabled: bool`` and
-    ``args_provider: ArgsProvider | None``.
+    without them keep working): ``display_name: str``, ``enabled: bool``,
+    ``args_provider: ArgsProvider | None`` and, on ProviderBase, the
+    ``resolve_args()`` / ``invalidate_args()`` methods used to ask for the
+    start arguments when the provider is enabled.
     """
 
     @property

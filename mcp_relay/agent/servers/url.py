@@ -26,7 +26,7 @@ import httpx2
 from mcp.client.streamable_http import streamable_http_client
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from .base import OnExit, ProviderBase, SendFrame, call_args_provider, session_message_to_dict, to_session_message
+from .base import OnExit, ProviderBase, SendFrame, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -168,10 +168,11 @@ class UrlServerInstance:
 class UrlServerProvider(ProviderBase):
     """Expose a remote streamable-HTTP MCP server under a server name.
 
-    When ``args_provider`` is set it is called per session: a returned list of
-    strings is appended to the URL as path segments (e.g. ``/mcp/<name>/team``)
-    and a returned dict is merged into the request headers. Returning ``None``
-    uses the base URL and headers unchanged.
+    When ``args_provider`` is set it is called when the provider is *enabled*
+    (see ProviderBase; the result is cached until the provider is disabled
+    again): a returned list of strings is appended to the URL as path segments
+    (e.g. ``/mcp/<name>/team``) and a returned dict is merged into the request
+    headers. Returning ``None`` uses the base URL and headers unchanged.
     """
 
     def __init__(self, name: str, url: str, headers: dict | None = None, *,
@@ -191,7 +192,9 @@ class UrlServerProvider(ProviderBase):
 
     def create(self, session_id: str, send: SendFrame, on_exit: OnExit) -> UrlServerInstance:
         url, headers = self._url, dict(self._headers)
-        extra = call_args_provider(self)
+        # Resolved (and cached) when the provider was enabled; this is only a
+        # fallback for providers never enabled through the setter.
+        extra = self.resolve_args()
         if extra is not None:
             if isinstance(extra, dict):
                 headers.update(extra)

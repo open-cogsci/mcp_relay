@@ -19,7 +19,7 @@ from typing import Any
 import anyio
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
-from .base import OnExit, ProviderBase, SendFrame, call_args_provider, session_message_to_dict, to_session_message
+from .base import OnExit, ProviderBase, SendFrame, session_message_to_dict, to_session_message
 
 log = logging.getLogger("relay-agent")
 
@@ -99,7 +99,8 @@ class InProcessServerProvider(ProviderBase):
 
     ``server_factory`` is called once per session as ``factory(*args)``, where
     ``args`` is the (possibly empty) tuple returned by ``args_provider`` when
-    the session is opened -- e.g. ``make_server(root_dir)``. Zero-argument
+    the provider is *enabled* (see ProviderBase; the result is cached until the
+    provider is disabled again) -- e.g. ``make_server(root_dir)``. Zero-argument
     factories keep working when no ``args_provider`` is set.
     """
 
@@ -112,7 +113,9 @@ class InProcessServerProvider(ProviderBase):
         self._factory = server_factory
 
     def create(self, session_id: str, send: SendFrame, on_exit: OnExit) -> InProcessServerInstance:
-        args = call_args_provider(self)
+        # Resolved (and cached) when the provider was enabled; this is only a
+        # fallback for providers never enabled through the setter.
+        args = self.resolve_args()
         if args is None:
             args = ()
         elif isinstance(args, (list, tuple)):

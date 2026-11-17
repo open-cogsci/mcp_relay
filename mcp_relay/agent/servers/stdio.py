@@ -14,7 +14,7 @@ import shlex
 import shutil
 
 from ..protocol import MAX_MESSAGE, RESERVED_SERVER_NAMES, SERVER_NAME_RE, dumps
-from .base import OnExit, ProviderBase, SendFrame, call_args_provider
+from .base import OnExit, ProviderBase, SendFrame
 
 log = logging.getLogger("relay-agent")
 
@@ -117,11 +117,14 @@ class StdioServerProvider(ProviderBase):
     """Expose a stdio command under a server name.
 
     ``argv`` is the base command. When ``args_provider`` is given it is called
-    every time a session is opened (on the agent's asyncio thread) and the
-    returned list of strings (or a single string) is *appended* to ``argv`` --
-    e.g. ``mcp-server-filesystem <root>`` where ``<root>`` comes from a
-    folder-selection dialog. Returning ``None``/``[]`` uses ``argv`` as is;
-    raising (e.g. the user cancelled the dialog) fails just that session.
+    when the provider is *enabled* (see ProviderBase) and the returned list of
+    strings (or a single string) is *appended* to ``argv`` -- e.g.
+    ``mcp-server-filesystem <root>`` where ``<root>`` comes from a
+    folder-selection dialog. The result is cached until the provider is
+    disabled, so every session of an enabled server starts with the same
+    arguments. Returning ``None``/``[]`` uses ``argv`` as is; raising (e.g.
+    the user cancelled the dialog) fails the enable, leaving the server
+    disabled.
     """
 
     def __init__(self, name: str, argv: list[str], *, display_name: str | None = None,
@@ -141,7 +144,9 @@ class StdioServerProvider(ProviderBase):
         return LocalServer(self._name, argv, session_id, send, on_exit)
 
     def _resolve_args(self) -> list[str]:
-        extra = call_args_provider(self)
+        # Resolved (and cached) when the provider was enabled; this is only a
+        # fallback for providers never enabled through the setter.
+        extra = self.resolve_args()
         if extra is None:
             return []
         if isinstance(extra, str):

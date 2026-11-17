@@ -98,6 +98,8 @@ def test_enabled_providers_filters_by_flag():
 
 
 def test_stdio_args_provider_appends_argv_at_create():
+    """create() uses the arguments resolved at enable-time (cached); it only
+    calls args_provider itself for providers never enabled via the setter."""
     calls = []
 
     def args():
@@ -106,9 +108,14 @@ def test_stdio_args_provider_appends_argv_at_create():
 
     p = StdioServerProvider("files", ["mcp-server-filesystem"], args_provider=args)
     assert p.argv == ["mcp-server-filesystem"]  # base argv is unchanged
+    # never enabled through the setter -> create() resolves lazily (fallback)
     inst = p.create("sess", send=None, on_exit=lambda s: None)
     assert inst.argv == ["mcp-server-filesystem", "/some/root"]
-    assert len(calls) == 1  # called once per created session
+    assert len(calls) == 1
+    # ... and caches: further sessions reuse the args without calling again
+    inst2 = p.create("sess2", send=None, on_exit=lambda s: None)
+    assert inst2.argv == ["mcp-server-filesystem", "/some/root"]
+    assert len(calls) == 1
     # a single string is wrapped; None means no extra args
     p2 = StdioServerProvider("s", ["cmd"], args_provider=lambda: "/root")
     assert p2.create("s1", None, lambda s: None).argv == ["cmd", "/root"]
@@ -118,6 +125,52 @@ def test_stdio_args_provider_appends_argv_at_create():
     p4 = StdioServerProvider("bad", ["cmd"], args_provider=lambda: 42)
     with pytest.raises(TypeError):
         p4.create("s3", None, lambda s: None)
+
+
+def test_args_provider_called_on_each_enable_and_cached_until_disabled():
+    """The core of the new semantics: enabling asks for the arguments (anew
+    every time), disabling invalidates them, and create() reuses the cache."""
+    calls = []
+
+    def args():
+        calls.append(len(calls))
+        return [f"/root-{len(calls)}"]
+
+    p = StdioServerProvider("files", ["cmd"], enabled=False, args_provider=args)
+    assert calls == []  # construction with enabled=False never asks
+
+    p.enabled = True  # first enable asks
+    assert calls == [0]
+    assert p.create("s1", None, lambda s: None).argv == ["cmd", "/root-1"]
+    assert p.create("s2", None, lambda s: None).argv == ["cmd", "/root-1"]
+    assert len(calls) == 1  # cached: sessions don't re-ask
+
+    p.enabled = False  # disable invalidates
+    assert p.enabled is False
+    p.enabled = True  # re-enable asks anew
+    assert calls == [0, 1]
+    assert p.create("s3", None, lambda s: None).argv == ["cmd", "/root-2"]
+    assert len(calls) == 2
+
+
+def test_failed_enable_leaves_provider_disabled_and_unresolved():
+    """If args_provider raises when enabling (e.g. the user cancels the dialog),
+    the flag is not set and the next enable asks again."""
+    calls = []
+
+    def args():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("user cancelled")
+        return ["/ok"]
+
+    p = StdioServerProvider("files", ["cmd"], enabled=False, args_provider=args)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        p.enabled = True
+    assert p.enabled is False
+    p.enabled = True  # asks anew
+    assert p.enabled is True and len(calls) == 2
+    assert p.create("s", None, lambda s: None).argv == ["cmd", "/ok"]
 
 
 def test_inprocess_args_provider_becomes_factory_args():
