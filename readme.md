@@ -1,4 +1,4 @@
-# MCP relay example
+# MCP relay
 
 Copyright Sebastiaan Mathôt 2026. Contains AI-generated code.
 
@@ -20,7 +20,9 @@ python server.py
 
 ### Desktop (agent)
 
-On the desktop, start `example_qt_app.py` (or an application derived from it). This connects to the relay server and makes MCP servers available to the client. 
+First, `desktop-relay` tool in your MPC client and ask for a pairing code.
+
+Next, on the desktop, start `example_qt_app.py` (or an application derived from it). This connects to the relay server and makes MCP servers available to the client. 
 
 Alternatively, pair the agent and run and MCP server through the command line.
 
@@ -53,3 +55,8 @@ mcpServers:
 ```
 
 The `Authorization` token should match the RELAY_API_KEY of the server. The `X-User-Id` is a placeholder following LibreChat's config system, and does not depend on the relay configuration.
+
+
+## License
+
+`mcp-relay` is licensed under the [GNU General Public License v3](http://www.gnu.org/licenses/gpl-3.0.en.html).
