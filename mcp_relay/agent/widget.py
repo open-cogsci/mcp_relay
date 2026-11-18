@@ -50,6 +50,7 @@ import logging
 import queue
 import socket
 import threading
+import qtawesome as qta
 from pathlib import Path
 
 from qtpy.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
@@ -290,7 +291,11 @@ class RelayWidget(QWidget):
         for name, provider in self._providers.items():
             btn = QPushButton(getattr(provider, "display_name", None) or name)
             btn.setCheckable(True)
-            btn.setChecked(bool(getattr(provider, "enabled", True)))
+            checked = bool(getattr(provider, "enabled", True))
+            btn.setChecked(checked)
+            btn.setFlat(True)
+            btn.setStyleSheet("QPushButton { text-align: left; }")
+            btn.setIcon(qta.icon('mdi6.toggle-switch' if checked else 'mdi6.toggle-switch-off-outline'))
             tooltip = f"Protocol name: {name}"
             if getattr(provider, "args_provider", None) is not None:
                 tooltip += "\nStart arguments are requested when you enable this server"
@@ -378,13 +383,15 @@ class RelayWidget(QWidget):
         # hidden in needs_pairing where Pair/Cancel are the actions
         self._connect_btn.setVisible(state != "needs_pairing")
         self._connect_btn.setText("Disconnect" if running else "Connect")
+        self._connect_btn.setIcon(qta.icon('mdi6.stop' if running else 'mdi6.play'))
         self._connect_btn.setEnabled(True)
         self._cancel_btn.setVisible(state == "needs_pairing")
 
         # secondary action: while running -> "Disconnect & Unpair";
         # when disconnected/fatal and paired -> plain "Unpair"
+        self._action_btn.setIcon(qta.icon('mdi6.close'))
         if running:
-            self._action_btn.setText("Disconnect && Unpair")
+            self._action_btn.setText("Disconnect and Unpair")
             self._action_btn.setVisible(True)
             self._action_btn.setEnabled(True)
         elif paired and state in ("disconnected", "fatal"):
@@ -411,18 +418,19 @@ class RelayWidget(QWidget):
 
     def _on_server_toggled(self, name: str, checked: bool) -> None:
         provider = self._providers[name]
+        btn = self._toggle_buttons[name]
         try:
             # ProviderBase.enabled resolves the start arguments when enabling
             # (each enable asks anew) and raises -- leaving the flag unchanged
             # -- when e.g. the user cancels the folder dialog.
             provider.enabled = bool(checked)
+            btn.setIcon(qta.icon('mdi6.toggle-switch' if checked else 'mdi6.toggle-switch-off-outline'))
         except Exception as exc:
             log.info("server %r was not enabled: %s", name, exc)
             self._set_provider_flag(provider, False)
-            btn = self._toggle_buttons[name]
             btn.blockSignals(True)
             btn.setChecked(False)
-            btn.blockSignals(False)
+            btn.blockSignals(False)        
         self._notify_servers_changed()
         self._refresh()
         self.servers_changed.emit(self.enabled_servers())
