@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "sigmund_mcp_relay"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lets local MCP servers connect to a cloud MCP client (e.g. LibreChat)"
 authors = ["Sebastiaan Mathôt <s.mathot@cogsci.nl>"]
 readme = "readme.md"
