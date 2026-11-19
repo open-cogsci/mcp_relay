@@ -271,13 +271,21 @@ class RelayWidget(QWidget):
     def _build_ui(self) -> None:
         self.setWindowTitle("MCP relay")
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
         
         pix_label = QLabel()
         pix_label.setAlignment(Qt.AlignCenter)
         pixmap = QPixmap(os.path.join(os.path.dirname(__file__),
                                       'sigmund-full.png'))
         pix_label.setPixmap(pixmap)
-        layout.addWidget(pix_label)                
+        layout.addWidget(pix_label)
+        
+        self._status_label = QLabel()
+        self._status_label.setTextFormat(Qt.RichText)
+        self._status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self._status_label.setWordWrap(True)
+        self._status_label.setOpenExternalLinks(True)
+        layout.addWidget(self._status_label)
 
         # One toggle button per available MCP server. The button shows the
         # human-readable display_name (protocol name in the tooltip) and its
@@ -319,10 +327,6 @@ class RelayWidget(QWidget):
                     btn.setChecked(False)
                     btn.blockSignals(False)
         layout.addWidget(self._servers_container)
-    
-        self._status_label = QLabel()
-        self._status_label.setWordWrap(True)
-        layout.addWidget(self._status_label)
 
         # Pairing input, wrapped in a container so it can be shown only
         # when the user actually needs to enter a pairing code.
@@ -354,26 +358,26 @@ class RelayWidget(QWidget):
 
     def _status_text(self) -> str:
         if self._state == "connected":
-            return "Connected to chat.sigmundai.eu"
+            return 'Connected to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a>'
         if self._state == "connecting":
-            return "Connecting to chat.sigmundai.eu…"
+            return 'Connecting to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a> …'
         if self._state == "reconnecting":
             return "Connection lost. Reconnecting automatically. Press Disconnect to stop"
         if self._state == "needs_pairing":
-            return ("Enable the get-pairing-code tool in chat.sigmundai.eu and ask for a code")
+            return 'Enable the get-pairing-code tool in <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a> and ask for a code'
         # The fatal state should never be shown because it transitions
         # immediately to disconnected (via _unpair)
         if self._state == "fatal":
             return ("The relay rejected this device (revoked or replaced). "
                     "Press Connect to retry, or Unpair to pair a new device.")
-        return "Not connected to chat.sigmundai.eu"
+        return 'Not connected to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a>'
 
     def _refresh(self) -> None:
         state = self._state
         paired = bool(self._credentials)
         running = self._thread is not None
         self._status_label.setText(self._status_text())
-
+    
         # pairing input is only visible when a code is actually needed
         self._pair_container.setVisible(state == "needs_pairing")
         self._code_edit.setEnabled(not running)
