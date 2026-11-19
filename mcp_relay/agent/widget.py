@@ -40,7 +40,7 @@ User-facing state machine (see ``RelayWidget.state`` / ``state_changed``)::
     connected     --Disconnect--> disconnected
     connected     --Disconnect & Unpair--> disconnected (credentials removed)
     connecting/connected --connection lost--> reconnecting --online--> connected
-    connecting/connected --relay rejects device--> unpaired --> disconnected
+    connecting/connected --relay rejects device--> disconnected
 
 The three primary user states are DISCONNECTED / NEEDS_PAIRING / CONNECTED.
 """
@@ -581,9 +581,9 @@ class RelayWidget(QWidget):
             if self._state in ("connecting", "connected"):
                 self._set_state("reconnecting")
         elif state == "fatal":
-            self._unpair(confirm=False)
+            self._append_log("Agent thread encountered fatal error (maybe another agent connected)")
         elif state == "failed":
-            self._append_log("Agent thread failed; press Connect to retry.")
+            self._append_log("Agent thread failed")
 
     def _on_thread_finished(self, thread: _AgentThread) -> None:
         if self._thread is thread:
