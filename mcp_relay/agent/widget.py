@@ -39,10 +39,15 @@ User-facing state machine (see ``RelayWidget.state`` / ``state_changed``)::
     needs_pairing --Cancel--> disconnected
     connected     --Disconnect--> disconnected
     connected     --Disconnect & Unpair--> disconnected (credentials removed)
-    connecting/connected --connection lost--> reconnecting --online--> connected
-    connecting/connected --relay rejects device--> disconnected
+    connecting/connected --connection lost--> fatal
+    connecting/connected --relay rejects device--> fatal
+    fatal --Connect--> connecting
 
 The three primary user states are DISCONNECTED / NEEDS_PAIRING / CONNECTED.
+The "fatal" state (the connection was lost, e.g. because another agent
+connected or because of a network error) mirrors the "disconnected" state --
+Connect retries, Unpair works while paired -- except that its status text
+explains what happened; the agent never reconnects automatically from it.
 """
 import os
 import asyncio
@@ -65,10 +70,27 @@ from .credentials import (DEFAULT_STATE_FILE, PairingError, delete_state,
 log = logging.getLogger("relay-agent")
 
 
+# The remote chat application the relay connects to, as one marked-up link;
+# defined once so every user-facing status text shows the same URL.
+CHAT_LINK = '<a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a>'
+
 # The states the widget can be in. The three primary user states are
 # "disconnected", "needs_pairing" and "connected"; the rest are auxiliary.
-STATES = ("disconnected", "needs_pairing", "connecting", "connected",
-          "reconnecting", "fatal")
+STATES = ("disconnected", "needs_pairing", "connecting", "connected", "fatal")
+
+# The text shown on the status label for each state ("RelayWidget._status_text"
+# is simply this lookup). The "fatal" state mirrors the "disconnected" state
+# except for its status text, which explains that the connection was lost; the
+# agent never reconnects automatically after it (see the state machine above).
+STATUS_TEXTS = {
+    "disconnected": f"Not connected to {CHAT_LINK}",
+    "needs_pairing": (f"Enable the get-pairing-code tool in {CHAT_LINK} "
+                      f"and ask for a code"),
+    "connecting": f"Connecting to {CHAT_LINK} …",
+    "connected": f"Connected to {CHAT_LINK}",
+    "fatal": (f"Connection to {CHAT_LINK}' was lost. This may be because "
+              f"another agent connected or because of a network error."),
+}
 
 
 class _GuiDispatcher(QObject):
@@ -202,8 +224,14 @@ class _AgentThread(QThread):
             self.state_changed.emit("failed")
 
     def stop_client(self) -> None:
-        if self._loop is not None:
-            asyncio.run_coroutine_threadsafe(self._client.stop(), self._loop)
+        """Ask the agent to stop; safe even if the thread already exited
+        (e.g. the user clicks Disconnect just as a lost connection ends the
+        thread) -- then there is nothing left to stop."""
+        if self._loop is not None and self.isRunning():
+            try:
+                asyncio.run_coroutine_threadsafe(self._client.stop(), self._loop)
+            except RuntimeError:
+                pass  # the loop was closed as the thread exited: nothing to stop
 
 
 class RelayWidget(QWidget):
@@ -253,7 +281,7 @@ class RelayWidget(QWidget):
     @property
     def state(self) -> str:
         """One of STATES: disconnected / needs_pairing / connecting /
-        connected / reconnecting / fatal."""
+        connected / fatal."""
         return self._state
 
     def _set_state(self, state: str) -> None:
@@ -357,20 +385,7 @@ class RelayWidget(QWidget):
         layout.addStretch()
 
     def _status_text(self) -> str:
-        if self._state == "connected":
-            return 'Connected to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a>'
-        if self._state == "connecting":
-            return 'Connecting to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a> …'
-        if self._state == "reconnecting":
-            return "Connection lost. Reconnecting automatically. Press Disconnect to stop"
-        if self._state == "needs_pairing":
-            return 'Enable the get-pairing-code tool in <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a> and ask for a code'
-        # The fatal state should never be shown because it transitions
-        # immediately to disconnected (via _unpair)
-        if self._state == "fatal":
-            return ("The relay rejected this device (revoked or replaced). "
-                    "Press Connect to retry, or Unpair to pair a new device.")
-        return 'Not connected to <a href="https://chat.sigmundai.eu">chat.sigmundai.eu</a>'
+        return STATUS_TEXTS[self._state]
 
     def _refresh(self) -> None:
         state = self._state
@@ -450,8 +465,8 @@ class RelayWidget(QWidget):
     def _notify_servers_changed(self) -> None:
         """Push the new enabled-set to the relay if the agent is connected.
 
-        Offline (or mid-reconnect) this is a no-op: the next hello frame
-        advertises the current set anyway. Old relays ignore the frame.
+        Offline this is a no-op: the next hello frame advertises the current
+        set anyway. Old relays ignore the frame.
         """
         thread = self._thread
         loop = getattr(thread, "_loop", None) if thread is not None else None
@@ -581,18 +596,27 @@ class RelayWidget(QWidget):
         elif state == "connecting":
             if self._state in ("disconnected", "needs_pairing"):
                 self._set_state("connecting")
-        elif state == "offline":
-            if self._state in ("connecting", "connected"):
-                self._set_state("reconnecting")
         elif state == "fatal":
-            self._append_log("Agent thread encountered fatal error (maybe another agent connected)")
+            # The connection was lost and the agent does not reconnect: show
+            # the fatal state (which mirrors disconnected except for its
+            # status text) until the user presses Connect (or Unpair).
+            self._set_state("fatal")
         elif state == "failed":
             self._append_log("Agent thread failed")
 
     def _on_thread_finished(self, thread: _AgentThread) -> None:
         if self._thread is thread:
             self._thread = None
-        if self._state != "fatal":
+        if self._state == "fatal":
+            # A lost connection ended the thread: keep the fatal state (its
+            # status text explains why), but the buttons were last refreshed
+            # while the thread was still alive -- now that it is gone they
+            # must mirror "disconnected" again: Connect as the primary
+            # button and plain Unpair (while paired).
+            self._refresh()
+        else:
+            # The thread ended without a lost connection (e.g. after a
+            # deliberate stop): go back to the plain disconnected state.
             self._set_state("disconnected")
         self._stop_requested = False
 

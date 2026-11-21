@@ -15,8 +15,8 @@ import time
 
 import pytest
 
-from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayClient,
-                             StdioServerProvider, UrlServerProvider,
+from mcp_relay.agent import (Fatal, MCPServer, InProcessServerProvider,
+                             RelayClient, StdioServerProvider, UrlServerProvider,
                              call_args_provider, check_providers,
                              enabled_providers, load_state, parse_server_spec,
                              save_state, validate_server_list)
@@ -289,6 +289,61 @@ def test_client_update_servers_sends_frame_only_when_connected_and_changed():
         assert await c.update_servers() is True
         assert sent == ['{"type":"servers","servers":["on","off"]}']
         assert await c.update_servers() is True and len(sent) == 1  # deduped
+
+    asyncio.run(main())
+
+
+def test_run_forever_goes_fatal_and_never_reconnects(monkeypatch):
+    """Any lost connection must END run_forever rather than retry: state
+    "fatal" plus a user-presentable Fatal, with exactly one connect attempt.
+
+    Regression: run_forever used to be a backoff loop that swallowed every
+    error (including Fatal), so a replaced agent kept silently reconnecting.
+    """
+    import mcp_relay.agent.client as client_mod
+
+    attempts = []
+
+    def fake_connect(*args, **kwargs):
+        attempts.append(1)
+        raise OSError("connection refused")
+
+    states = []
+    monkeypatch.setattr(client_mod, "connect", fake_connect)
+    client = RelayClient("http://x/", "tok",
+                         {"hello": StdioServerProvider("hello", ["true"])},
+                         on_state=states.append)
+
+    with pytest.raises(Fatal, match="connection refused"):
+        asyncio.run(client.run_forever())
+
+    assert len(attempts) == 1  # never reconnected on its own
+    assert states == ["connecting", "fatal"]
+
+
+def test_stop_is_the_only_clean_exit(monkeypatch):
+    """stop() must end run_forever normally (state "offline", no Fatal):
+    a deliberate disconnect is not a lost connection."""
+    import mcp_relay.agent.client as client_mod
+
+    async def fake_connect_once(self):
+        # Stands in for "serve frames until asked to stop".
+        await self._stop_event.wait()
+        return None
+
+    monkeypatch.setattr(client_mod.RelayClient, "_connect_once",
+                        fake_connect_once)
+
+    async def main() -> None:
+        states = []
+        client = RelayClient("http://x/", "tok",
+                             {"hello": StdioServerProvider("hello", ["true"])},
+                             on_state=states.append)
+        run_task = asyncio.create_task(client.run_forever())
+        await asyncio.sleep(0.01)  # let the run enter _connect_once
+        await client.stop()
+        await run_task  # returns cleanly instead of raising Fatal
+        assert states == ["connecting", "offline"]
 
     asyncio.run(main())
 

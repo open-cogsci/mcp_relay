@@ -18,7 +18,13 @@ import json
 import re
 
 MAX_MESSAGE = 32 * 1024 * 1024  # must be >= the relay's uvicorn ws_max_size
-FATAL_CLOSE_CODES = {4001, 4400, 4401, 4403}  # replaced / bad hello / unauthorized / revoked
+# Close codes the relay uses on an agent for a permanent reason: replaced
+# by a newer agent (4001) / bad hello frame (4400) / bad device token (4401)
+# / revoked device (4403). The client itself now goes fatal on ANY lost
+# connection (it never reconnects on its own), so it no longer needs this
+# set to classify close codes; it is kept as protocol documentation and is
+# still exported for tests and future consumers.
+FATAL_CLOSE_CODES = {4001, 4400, 4401, 4403}
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 RESERVED_SERVER_NAMES = {"relay"}  # served by the relay itself; agents may not claim it
 

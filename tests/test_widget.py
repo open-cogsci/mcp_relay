@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qtpy.QtWidgets import QApplication
 
 from mcp_relay.agent import (InProcessServerProvider, RelayWidget,
-                             StdioServerProvider)
+                             StdioServerProvider, save_state)
 
 
 @pytest.fixture(scope="module")
@@ -213,3 +213,67 @@ def test_call_on_gui_thread_roundtrip(qapp):
 
     # calling from the GUI thread itself runs inline (no marshal needed)
     assert call_on_gui_thread(lambda: "inline-ok") == "inline-ok"
+
+
+def test_status_texts_cover_every_state_and_embed_the_chat_link():
+    """STATUS_TEXTS must hold exactly one text per widget state, and every
+    text must embed the one CHAT_LINK constant (defined once, so the URL
+    cannot drift between messages). 'reconnecting' is gone together with the
+    automatic reconnect it described."""
+    from mcp_relay.agent import widget as widget_mod
+
+    assert set(widget_mod.STATUS_TEXTS) == set(widget_mod.STATES)
+    assert "reconnecting" not in widget_mod.STATES
+    assert all(widget_mod.CHAT_LINK in t
+               for t in widget_mod.STATUS_TEXTS.values())
+    fatal = widget_mod.STATUS_TEXTS["fatal"]
+    assert fatal.startswith("Connection to ")
+    assert "was lost" in fatal
+    assert ("another agent connected or because of a network error" in fatal)
+
+
+def test_lost_connection_ends_in_fatal_state_with_connect_and_unpair(qapp, tmp_path):
+    """End to end: a connection lost while the agent is online (e.g. the relay
+    closing it because another agent connected) must leave the widget in the
+    'fatal' state, which mirrors the disconnected state once the agent thread
+    is gone: Connect as the primary button and Unpair (while paired) instead
+    of the running buttons.
+
+    Regression: the fatal state was entered while the thread was still alive,
+    so the buttons kept showing Disconnect / Disconnect and Unpair -- and
+    nothing ever recomputed them when the thread finished.
+    """
+    # Paired credentials and a relay address that is guaranteed unreachable
+    # (port 1 is closed): the widget auto-connects and the connection to the
+    # relay is lost immediately, exactly like another agent replacing this
+    # one would make the relay close our connection.
+    save_state(tmp_path / "creds.json", {"relay": "http://127.0.0.1:1",
+                                         "device_id": "dev1",
+                                         "device_token": "tok"})
+    w = RelayWidget(relay_url="http://127.0.0.1:1",
+                    providers={"hello": InProcessServerProvider(
+                        "hello", lambda: None)},
+                    state_file=tmp_path / "creds.json", auto_connect=True)
+    try:
+        assert w.state == "connecting"
+        assert w._connect_btn.text() == "Disconnect"  # an agent is running
+        assert w._action_btn.text() == "Disconnect and Unpair"
+        # Pump the event loop until the agent thread has died and its queued
+        # signals (fatal, finished) were delivered on the GUI thread.
+        deadline = time.time() + 20
+        while w._thread is not None and time.time() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert w._thread is None, "agent thread did not finish"
+        assert w.state == "fatal"
+        assert "was lost" in w._status_text()
+        # Mirroring "disconnected" also means flipping the buttons back.
+        assert w._connect_btn.text() == "Connect"
+        assert w._action_btn.text() == "Unpair"
+        assert w._action_btn.isVisibleTo(w)
+        # And Connect from the fatal state really starts a fresh agent.
+        w._on_connect_clicked()
+        assert w.state == "connecting" and w._thread is not None
+    finally:
+        w.close()
+        w.deleteLater()

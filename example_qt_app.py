@@ -148,7 +148,7 @@ def main() -> None:
     widget.resize(560, 500)
 
     # Watch the user-facing state machine (disconnected / needs_pairing /
-    # connecting / connected / reconnecting / fatal) in the window title.
+    # connecting / connected / fatal) in the window title.
     def on_state(state: str) -> None:
         widget.setWindowTitle(f"[{state}] MCP relay agent — three server kinds")
         print(f"state -> {state}")

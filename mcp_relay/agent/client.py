@@ -5,8 +5,13 @@ agent.py and the Qt widget in widget.py are thin wrappers around it):
 
     LibreChat --HTTP--> relay <--WebSocket-- RelayClient --frames--> ServerProvider(s)
 
-Reconnects automatically with backoff; close codes 4001/4400/4401/4403 are
-fatal (replaced / bad hello / unauthorized / revoked). State changes are
+Never reconnects on its own: whenever the connection is lost -- the relay
+closing it (e.g. close code 4001 because another agent connected, or 4401/
+4403 because the device was rejected/revoked) or a network error -- the run
+ends in the "fatal" state and raises Fatal, leaving the decision what to do
+to the embedding app (the widget shows its "fatal" state, which mirrors the
+disconnected state, and reconnects only when the user asks). The only clean
+exit is stop(), which returns with state "offline". State changes are
 reported through the optional ``on_state`` callback
 ("connecting" | "online" | "offline" | "fatal").
 """
@@ -15,21 +20,20 @@ import asyncio
 import contextlib
 import json
 import logging
-import random
 import re
 from collections.abc import Callable
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .protocol import FATAL_CLOSE_CODES, MAX_MESSAGE, dumps, validate_server_list
+from .protocol import MAX_MESSAGE, dumps, validate_server_list
 from .servers import ServerProvider, check_providers, enabled_providers
 
 log = logging.getLogger("relay-agent")
 
 
 class Fatal(Exception):
-    """Reconnecting will not help."""
+    """The connection run ended; the caller decides whether and how to retry."""
 
 
 class RelayClient:
@@ -97,37 +101,52 @@ class RelayClient:
                 await ws.close()
 
     async def run_forever(self) -> None:
-        self._stop_event = asyncio.Event()
-        delay = 1.0
-        while not self._stop_event.is_set():
-            self._set_state("connecting")
-            try:
-                if await self._connect_once():
-                    delay = 1.0  # we were connected for a while: start backoff afresh
-            except InvalidStatus as exc:
-                if exc.response.status_code in (401, 403):
-                    self._set_state("fatal")
-                    raise Fatal("The relay rejected this device's credentials (revoked?). Pair again.")
-                log.warning("relay answered HTTP %s", exc.response.status_code)
-            except (OSError, ConnectionClosed, asyncio.TimeoutError) as exc:
-                log.warning("connection problem: %s", exc or type(exc).__name__)
-            except Exception:
-                # Never let an unexpected error kill the reconnect loop.
-                log.exception("unexpected error in connection attempt")
-            if self._stop_event.is_set():
-                break
-            self._set_state("offline")
-            wait = delay * random.uniform(0.8, 1.2)
-            log.info("reconnecting in %.0fs", wait)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), wait)
-            except asyncio.TimeoutError:
-                pass
-            delay = min(delay * 2, 60.0)
-        self._set_state("offline")
+        """Serve the relay until the connection ends; never reconnects.
 
-    async def _connect_once(self) -> bool:
-        welcomed = False
+        Any lost connection -- the relay closing it (e.g. close code 4001
+        because another agent connected, or 4401/4403 because the device was
+        rejected/revoked) or a network error -- ends the run: the state
+        becomes "fatal" and a Fatal carrying a short, user-presentable
+        reason is raised, leaving the decision to the embedding app (the
+        widget shows its fatal state, which mirrors the disconnected one,
+        and reconnects only when the user presses Connect). The only clean
+        exit is stop(), which returns with state "offline".
+        """
+        self._stop_event = asyncio.Event()
+        self._set_state("connecting")
+        try:
+            loss = await self._connect_once()
+        except asyncio.CancelledError:
+            raise  # loop teardown in progress, not a lost connection
+        except InvalidStatus as exc:
+            if exc.response.status_code in (401, 403):
+                loss = ("The relay rejected this device's credentials "
+                        "(revoked?). Pair again.")
+            else:
+                log.warning("relay answered HTTP %s", exc.response.status_code)
+                loss = f"The relay answered with HTTP {exc.response.status_code}."
+        except (OSError, ConnectionClosed, asyncio.TimeoutError) as exc:
+            log.warning("connection problem: %s", exc or type(exc).__name__)
+            loss = f"Connection to the relay was lost: {exc or type(exc).__name__}"
+        except Exception:
+            # Defensive: an unexpected error must not leave the caller
+            # hanging in state "connecting" forever; it is a lost connection
+            # too.
+            log.exception("unexpected error in connection attempt")
+            loss = "Connection to the relay was lost: see the log for details."
+        if self._stop_event.is_set():
+            # stop() won the race against the failing connection: clean exit
+            self._set_state("offline")
+            return
+        self._set_state("fatal")
+        raise Fatal(loss or "Connection to the relay was lost.")
+
+    async def _connect_once(self) -> str | None:
+        """One connection: dial, handshake, serve frames until it ends.
+
+        Returns a short, user-presentable message saying why the connection
+        was lost, or None when it was ended deliberately by stop().
+        """
         log.info("connecting to %s", self.ws_url)
         async with connect(
             self.ws_url,
@@ -144,7 +163,6 @@ class RelayClient:
                 welcome = json.loads(await asyncio.wait_for(ws.recv(), 10))
                 if welcome.get("type") != "welcome":
                     raise ConnectionError(f"unexpected reply from relay: {welcome}")
-                welcomed = True
                 self._set_state("online")
                 log.info("connected; paired to user %r; exposing: %s",
                          welcome.get("user_id"), ", ".join(self.server_names))
@@ -160,10 +178,19 @@ class RelayClient:
             finally:
                 self._ws = None
                 await self._stop_all()
-            if ws.close_code in FATAL_CLOSE_CODES and not self._stop_event.is_set():
-                self._set_state("fatal")
-                raise Fatal(f"Relay closed the connection permanently ({ws.close_code}: {ws.close_reason}).")
-        return welcomed
+            if not self._stop_event.is_set():
+                # The connection ended without the user asking for it: that
+                # is a loss -- often the relay says why it closed (e.g. 4001
+                # "another agent connected"), otherwise it was a network
+                # error -- and the run must end fatally rather than
+                # reconnect automatically.
+                if ws.close_code is not None and ws.close_reason:
+                    return (f"The relay closed the connection ({ws.close_code}: "
+                            f"{ws.close_reason}).")
+                if ws.close_code not in (None, 1000, 1001, 1006):
+                    return f"The relay closed the connection (code {ws.close_code})."
+                return "Connection to the relay was lost."
+        return None  # stop() ended the connection: a clean exit, not a loss
 
     # -- frame handling ------------------------------------------------------
 

@@ -3,7 +3,8 @@
     # 1. one-time pairing: type the code your admin / web UI showed you
     python agent.py pair --relay https://relay.example.com --code K7QM-2XPD
 
-    # 2. run it (keep it running; it reconnects automatically)
+    # 2. run it (keep it running; reconnect with Ctrl-C + rerun if the
+    #    connection drops -- the agent does not reconnect automatically)
     python agent.py run --server hello="python hello_server.py"
 
 ``--server NAME=COMMAND`` can be repeated; the NAME becomes the URL path
@@ -15,6 +16,10 @@ The generic implementation lives in the ``mcp_relay.agent`` package,
 which additionally provides in-process and URL-based servers and a reusable
 Qt widget (see example_qt_app.py). This CLI exposes the stdio-subprocess
 flavor only.
+
+``run`` stays connected until the connection is lost or you interrupt it; it
+never reconnects on its own: after a lost connection it exits with
+`"Stopped: <reason>"`, so start it again to reconnect.
 """
 
 import argparse
