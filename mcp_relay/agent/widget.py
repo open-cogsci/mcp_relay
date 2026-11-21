@@ -24,6 +24,16 @@ the server is disabled again. Enabling happens on the GUI thread, so an
 user enable/disable servers at runtime; while connected the new set is sent
 to the relay in a "servers" frame, otherwise it applies on the next connect.
 
+Each server's toggle is a simple two-line column: a QCheckBox showing
+the provider's ``display_name`` (the qtawesome circle icons stand in for
+the checkbox's own square) and, below it, the provider's ``status_message``
+on a smaller, muted line indented to line up with the name ("Click to
+enable" while disabled and "Click to disable" while enabled by default;
+the in-process kind instead forwards the live ``MCPServer``'s own
+``status_message`` property whenever a relay session is open). The widget
+pulls that property on a short GUI-thread poll, so an in-process status
+property must be a cheap read of thread-safe state.
+
 The agent runs on its own QThread with its own asyncio loop; all cross-thread
 communication goes through Qt signals, so the widget is safe to use from the
 GUI thread of any Qt application (OpenSesame, a tray app, ...). This module
@@ -58,17 +68,28 @@ import threading
 import qtawesome as qta
 from pathlib import Path
 
-from qtpy.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
-from qtpy.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                            QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
-from qtpy.QtGui import QPixmap
+from qtpy.QtCore import (QMetaObject, QObject, QSize, Qt, QThread, QTimer,
+                         Signal, Slot)
+from qtpy.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel,
+                            QLineEdit, QMessageBox, QPlainTextEdit,
+                            QPushButton, QVBoxLayout, QWidget)
+from qtpy.QtGui import QPalette, QPixmap
 
 from .client import Fatal, RelayClient
 from .credentials import (DEFAULT_STATE_FILE, PairingError, delete_state,
                           load_state, redeem_pairing_code, save_state)
+from .servers.base import STATUS_MESSAGE_DISABLED, STATUS_MESSAGE_ENABLED
 
 log = logging.getLogger("relay-agent")
-
+ICONS = {
+    'enabled': 'mdi6.toggle-switch',
+    'disabled': 'mdi6.toggle-switch-off-outline',
+    # 'enabled': 'mdi6.checkbox-marked-circle',
+    # 'disabled': 'mdi6.checkbox-blank-circle-outline',
+    'connect': 'mdi6.play',
+    'disconnect': 'mdi6.stop',
+    'unpair': 'mdi6.close'
+}
 
 # The remote chat application the relay connects to, as one marked-up link;
 # defined once so every user-facing status text shows the same URL.
@@ -91,6 +112,14 @@ STATUS_TEXTS = {
     "fatal": (f"Connection to {CHAT_LINK}' was lost. This may be because "
               f"another agent connected or because of a network error."),
 }
+
+# How often (ms) the GUI thread polls the providers' status_message
+# properties. A status_message is a simple property (pull, no "changed"
+# event), and a live in-process server's status can change at any time -- e.g.
+# because a tool call ran -- so the widget refreshes the toggle buttons on
+# this timer, next to the refreshes on every state change. See
+# RelayWidget._refresh_status_messages.
+STATUS_POLL_INTERVAL_MS = 1000
 
 
 class _GuiDispatcher(QObject):
@@ -234,13 +263,108 @@ class _AgentThread(QThread):
                 pass  # the loop was closed as the thread exited: nothing to stop
 
 
+class _ServerToggleRow(QWidget):
+    """One server's toggle: a QCheckBox (toggle icon + display name) with the
+    provider's status_message on a smaller, muted line below.
+
+    Deliberately assembled from stock widgets -- no custom painting, no
+    manual size calculations: the checkbox keeps its native keyboard
+    handling, hover and accessible checked state, and the QLabel lays the
+    status text out natively (wrapping included). The qtawesome circle icon
+    handed to :meth:`set_icon` stands in for the checkbox's own square
+    indicator (hidden with a one-line stylesheet), and the status line is
+    indented to line up with the checkbox text.
+    """
+
+    toggled = Signal(bool)  # re-emitted from the internal checkbox
+
+    _ICON_TEXT_GAP = 10  # px added after the icon when indenting the status line
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self._status = ""
+        self._check = QCheckBox(label, self)
+        # One style rule, not custom painting: only the checkbox's own square
+        # goes away, so the set_icon() circle is the single visible indicator.
+        self._check.setStyleSheet("QCheckBox::indicator { width: 0; height: 0; }")
+        self._check.toggled.connect(self.toggled.emit)
+        self._status_label = QLabel(self)
+        self._status_label.setWordWrap(True)
+        self._status_label.hide()  # only shown once a status message is set
+        self._status_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+        font = self._status_label.font()
+        pt = font.pointSizeF()
+        if pt > 0:
+            font.setPointSizeF(max(7.0, pt * 0.85))
+        elif font.pixelSize() > 0:
+            font.setPixelSize(max(9, int(font.pixelSize() * 0.85)))
+        self._status_label.setFont(font)
+        row = QVBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self._check)
+        row.addWidget(self._status_label)
+
+    # -- checkbox passthrough -----------------------------------------------
+
+    def text(self) -> str:
+        """The checkbox label: the server's display name."""
+        return self._check.text()
+
+    def isChecked(self) -> bool:
+        return self._check.isChecked()
+
+    def setChecked(self, checked: bool) -> None:
+        """Set the checked state. ``blockSignals()`` on this row works as
+        expected: the row re-emits only its own ``toggled`` signal to the
+        outside world, and that emission respects the block."""
+        self._check.setChecked(bool(checked))
+
+    def setToolTip(self, text) -> None:
+        super().setToolTip(text)
+        self._check.setToolTip(text)  # child widgets do not inherit tooltips
+
+    def set_icon(self, icon, size: QSize | None = None) -> None:
+        """Show ``icon`` as the visible indicator (optionally at ``size``).
+
+        Also re-indents the status line so it keeps lining up with the
+        checkbox text whatever the icon size.
+        """
+        if size is not None:
+            self._check.setIconSize(size)
+        self._check.setIcon(icon)
+        self._status_label.setIndent(
+            self._check.iconSize().width() + self._ICON_TEXT_GAP)
+
+    # -- status ----------------------------------------------------------------
+
+    def status_message(self) -> str:
+        """The status text currently shown below the checkbox."""
+        return self._status
+
+    def set_status_message(self, message: str) -> None:
+        """Show ``message`` on the small second line; a no-op when unchanged.
+
+        An empty message clears the line: the label is hidden, so no blank
+        gap remains in the layout.
+        """
+        message = "" if message is None else str(message)
+        if message == self._status:
+            return
+        self._status = message
+        self._status_label.setText(message)
+        self._status_label.setVisible(bool(message))
+
+
 class RelayWidget(QWidget):
     """Pair / connect / unpair widget for one relay agent.
 
     ``relay_url`` is fixed at construction (config, not user input). The
     pairing-code row is only shown while the state is "needs_pairing".
 
-    One toggle button per registered provider shows its ``display_name`` and
+    One toggle row per registered provider shows its ``display_name`` with
+    the provider's ``status_message`` in small print below (the "Click to ..."
+    defaults, or live status while an in-process session runs) and
     enables/disables the server at runtime (``set_server_enabled`` does the
     same programmatically). Emits ``state_changed(str)`` with one of
     ``STATES`` whenever the user-facing state changes, and
@@ -271,6 +395,14 @@ class RelayWidget(QWidget):
         self._stop_requested = False
         self._build_ui()
         self.pair_done.connect(self._on_pair_done)
+        # Providers' status messages are pull-based (plain properties) and a
+        # live in-process server's can change whenever a tool runs, so next to
+        # refreshing on every state change the widget also polls them on a
+        # short GUI-thread timer (see _refresh_status_messages).
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(STATUS_POLL_INTERVAL_MS)
+        self._status_timer.timeout.connect(self._refresh_status_messages)
+        self._status_timer.start()
         self._credentials = load_state(self._state_file)
         self._refresh()
         if self._credentials and auto_connect:
@@ -315,23 +447,23 @@ class RelayWidget(QWidget):
         self._status_label.setOpenExternalLinks(True)
         layout.addWidget(self._status_label)
 
-        # One toggle button per available MCP server. The button shows the
-        # human-readable display_name (protocol name in the tooltip) and its
-        # checked state mirrors provider.enabled, so servers can be turned on
-        # and off at runtime instead of only at initialization.
+        # One toggle row per available MCP server: a checkbox (circle icon +
+        # display name) with the provider's status_message in small print
+        # beneath it (protocol name in the tooltip). Its checked state mirrors
+        # provider.enabled, so servers can be turned on and off at runtime
+        # instead of only at initialization.
         self._servers_container = QWidget()
         servers_row = QVBoxLayout(self._servers_container)
         servers_row.setContentsMargins(0, 0, 0, 0)
         servers_row.addWidget(QLabel("Allow Sigmund to"))
-        self._toggle_buttons: dict[str, QPushButton] = {}
+        self._toggle_buttons: dict[str, _ServerToggleRow] = {}
         for name, provider in self._providers.items():
-            btn = QPushButton(getattr(provider, "display_name", None) or name)
-            btn.setCheckable(True)
+            btn = _ServerToggleRow(getattr(provider, "display_name", None) or name)
             checked = bool(getattr(provider, "enabled", True))
             btn.setChecked(checked)
-            btn.setFlat(True)
-            btn.setStyleSheet("QPushButton { text-align: left; }")
-            btn.setIcon(qta.icon('mdi6.toggle-switch' if checked else 'mdi6.toggle-switch-off-outline'))
+            btn.set_status_message(self._provider_status_message(provider))
+            btn.set_icon(qta.icon(ICONS['enabled'] if checked else ICONS['disabled']),
+                         QSize(24, 24))
             tooltip = f"Protocol name: {name}"
             if getattr(provider, "args_provider", None) is not None:
                 tooltip += "\nStart arguments are requested when you enable this server"
@@ -392,6 +524,7 @@ class RelayWidget(QWidget):
         paired = bool(self._credentials)
         running = self._thread is not None
         self._status_label.setText(self._status_text())
+        self._refresh_status_messages()
     
         # pairing input is only visible when a code is actually needed
         self._pair_container.setVisible(state == "needs_pairing")
@@ -402,13 +535,14 @@ class RelayWidget(QWidget):
         # hidden in needs_pairing where Pair/Cancel are the actions
         self._connect_btn.setVisible(state != "needs_pairing")
         self._connect_btn.setText("Disconnect" if running else "Connect")
-        self._connect_btn.setIcon(qta.icon('mdi6.stop' if running else 'mdi6.play'))
+        self._connect_btn.setIcon(
+            qta.icon(ICONS['disconnect'] if running else ICONS['connect']))
         self._connect_btn.setEnabled(True)
         self._cancel_btn.setVisible(state == "needs_pairing")
 
         # secondary action: while running -> "Disconnect & Unpair";
         # when disconnected/fatal and paired -> plain "Unpair"
-        self._action_btn.setIcon(qta.icon('mdi6.close'))
+        self._action_btn.setIcon(qta.icon(ICONS['unpair']))
         if running:
             self._action_btn.setText("Disconnect and Unpair")
             self._action_btn.setVisible(True)
@@ -419,6 +553,42 @@ class RelayWidget(QWidget):
             self._action_btn.setEnabled(True)
         else:
             self._action_btn.setVisible(False)
+
+    def _provider_status_message(self, provider) -> str:
+        """The provider's current status message; never raises.
+
+        Providers without a status_message at all (plain provider objects
+        registered without ProviderBase) still get the click-to-enable /
+        click-to-disable defaults, so every toggle button explains itself.
+        """
+        try:
+            message = provider.status_message
+        except Exception:
+            log.exception("reading status_message of provider %r failed; "
+                          "falling back to the default",
+                          getattr(provider, "name", provider))
+            message = None
+        if not isinstance(message, str):
+            message = "" if message is None else str(message)
+        if not message:
+            enabled = bool(getattr(provider, "enabled", True))
+            message = (STATUS_MESSAGE_ENABLED if enabled
+                       else STATUS_MESSAGE_DISABLED)
+        return message
+
+    def _refresh_status_messages(self) -> None:
+        """Push every provider's status_message into its toggle button.
+
+        A status_message is pull-based: an in-process provider reports what
+        its newest *live* MCPServer says right now (see
+        InProcessServerProvider.status_message), so it can change without the
+        widget doing anything. Called on every UI refresh and on
+        self._status_timer.
+        """
+        for name, provider in self._providers.items():
+            btn = self._toggle_buttons.get(name)
+            if btn is not None:
+                btn.set_status_message(self._provider_status_message(provider))
 
     def _append_log(self, text: str) -> None:
         log.info(text)
@@ -443,7 +613,7 @@ class RelayWidget(QWidget):
             # (each enable asks anew) and raises -- leaving the flag unchanged
             # -- when e.g. the user cancels the folder dialog.
             provider.enabled = bool(checked)
-            btn.setIcon(qta.icon('mdi6.toggle-switch' if checked else 'mdi6.toggle-switch-off-outline'))
+            btn.set_icon(qta.icon(ICONS['enabled'] if checked else ICONS['disabled']))
         except Exception as exc:
             log.info("server %r was not enabled: %s", name, exc)
             self._set_provider_flag(provider, False)

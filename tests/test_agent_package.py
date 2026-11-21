@@ -202,6 +202,75 @@ def test_url_args_provider_appends_path_or_headers():
     assert inst3.url == "http://x/mcp" and inst3.headers == {"A": "1"}
 
 
+# -- provider status messages ----------------------------------------------
+
+
+def test_status_message_click_to_enable_disable_defaults():
+    """ProviderBase.status_message: the default reflects what clicking the
+    toggle button does, across all supported provider kinds."""
+    p = StdioServerProvider("hello", ["true"], enabled=False)
+    assert p.status_message == "Click to enable"
+    p.enabled = True
+    assert p.status_message == "Click to disable"
+    q = UrlServerProvider("remote", "http://x/mcp", enabled=False)
+    assert q.status_message == "Click to enable"
+    r = InProcessServerProvider("inproc", lambda: None)
+    assert r.status_message == "Click to disable"  # enabled, nothing live yet
+
+
+def test_inprocess_provider_surfaces_live_server_status_message():
+    """While a relay session runs, the in-process provider reports the newest
+    live MCPServer's status_message property (the factory runs per session);
+    between sessions (and for servers without the property) it falls back to
+    ProviderBase's "Click to disable".
+    """
+
+    class FakeMCPServer:
+        def __init__(self, message: str):
+            self._message = message
+
+        @property
+        def status_message(self) -> str:
+            return self._message
+
+        def create_initialization_options(self):
+            return object()
+
+        async def run(self, read_stream, write_stream, init_options):
+            # "Serve" until instance.stop() closes the streams below.
+            try:
+                while True:
+                    await read_stream.receive()
+            except Exception:
+                pass
+            finally:
+                with contextlib.suppress(Exception):
+                    await write_stream.aclose()
+
+    made = []
+
+    def factory():
+        made.append(FakeMCPServer(f"session {len(made)}"))
+        return made[-1]
+
+    p = InProcessServerProvider("hello", factory)
+    assert p.status_message == "Click to disable"  # enabled, nothing live yet
+
+    async def main():
+        i1 = p.create("s1", send=None, on_exit=lambda s: None)
+        await i1.start()
+        assert p.status_message == "session 0"
+        i2 = p.create("s2", send=None, on_exit=lambda s: None)
+        await i2.start()
+        assert p.status_message == "session 1"  # newest live session wins
+        await i2.stop()
+        assert p.status_message == "session 0"  # the older session remains
+        await i1.stop()
+        assert p.status_message == "Click to disable"  # nothing live anymore
+
+    asyncio.run(main())
+
+
 # -- client ----------------------------------------------------------------
 
 

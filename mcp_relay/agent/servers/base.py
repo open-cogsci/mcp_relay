@@ -7,8 +7,8 @@ every relay session ("open" frame) the client asks the provider to *create*
 one *instance*; each instance corresponds to exactly one MCP session on the
 relay side, so no JSON-RPC id remapping is ever needed.
 
-Beyond ``name``, providers may carry three optional pieces of metadata that
-drive the agent GUI (see ``mcp_relay.agent.widget.RelayWidget``):
+Beyond ``name``, providers may carry optional pieces of metadata that drive
+the agent GUI (see ``mcp_relay.agent.widget.RelayWidget``):
 
 * ``display_name`` -- human-readable label for the GUI (the protocol ``name``
   is limited to ``[A-Za-z0-9_.-]{1,64}`` by SERVER_NAME_RE).
@@ -21,6 +21,11 @@ drive the agent GUI (see ``mcp_relay.agent.widget.RelayWidget``):
   start enabled, and anew every time a server is enabled afterwards -- and
   the result is cached and reused for every session until the provider is
   disabled again (see :meth:`ProviderBase.resolve_args`).
+* ``status_message`` -- read-only property shown in small print inside the
+  GUI toggle button, under the ``display_name``: ProviderBase defaults to
+  "Click to enable" while disabled and "Click to disable" while enabled, and
+  InProcessServerProvider overrides it to forward a live MCPServer's own
+  ``status_message`` property while a relay session is open.
 """
 
 from collections.abc import Awaitable, Callable
@@ -34,6 +39,14 @@ OnExit = Callable[[str], None]  # called when an instance exits on its own
 
 # Optional metadata; anything registered as a provider may define these.
 ArgsProvider = Callable[[], Any]  # returns start arguments for the server
+
+# Default status_message texts for the GUI toggle buttons (see
+# ``ProviderBase.status_message``): while disabled the button tells the user
+# what clicking it does; while enabled there is nothing to say -- unless a
+# live in-process server's own status_message takes over (see
+# InProcessServerProvider.status_message).
+STATUS_MESSAGE_ENABLED = "Click to disable"
+STATUS_MESSAGE_DISABLED = "Click to enable"
 
 
 def to_session_message(msg: dict) -> SessionMessage:
@@ -71,9 +84,10 @@ class ProviderBase:
     """Shared implementation of the optional provider metadata.
 
     Holds ``display_name`` (defaults to the protocol ``name``), the mutable
-    ``enabled`` flag (default True) and the optional ``args_provider``
-    callable. The three concrete providers inherit from this so the widget
-    can treat them uniformly via getattr().
+    ``enabled`` flag (default True), the optional ``args_provider`` callable
+    and the read-only ``status_message`` property for the GUI toggle button
+    (see :attr:`status_message`). The three concrete providers inherit from
+    this so the widget can treat them uniformly via getattr().
 
     Setting ``enabled = True`` asks for the start arguments synchronously in
     the caller's thread (see :meth:`resolve_args`) and may raise -- e.g. when
@@ -120,6 +134,20 @@ class ProviderBase:
     def args_provider(self) -> ArgsProvider | None:
         return self._args_provider
 
+    @property
+    def status_message(self) -> str:
+        """A short user-facing status message, shown in small print inside the
+        GUI toggle button, under the ``display_name``.
+
+        The default describes the toggle action the user sees: "Click to
+        enable" while disabled, "Click to disable" while enabled. Only the
+        in-process kind can know more (it may forward a live MCPServer's
+        status_message, see InProcessServerProvider). The GUI polls this
+        property on a short timer, so overrides must be cheap and only read
+        thread-safe state.
+        """
+        return STATUS_MESSAGE_ENABLED if self._enabled else STATUS_MESSAGE_DISABLED
+
     def resolve_args(self) -> Any:
         """Return the start arguments, calling ``args_provider`` once if they
         were not resolved yet (or were invalidated by a disable).
@@ -156,9 +184,10 @@ class ServerProvider(Protocol):
 
     Optional attributes (checked with getattr, so plain provider objects
     without them keep working): ``display_name: str``, ``enabled: bool``,
-    ``args_provider: ArgsProvider | None`` and, on ProviderBase, the
-    ``resolve_args()`` / ``invalidate_args()`` methods used to ask for the
-    start arguments when the provider is enabled.
+    ``args_provider: ArgsProvider | None``, ``status_message: str`` (see
+    ProviderBase.status_message) and, on ProviderBase, the ``resolve_args()``
+    / ``invalidate_args()`` methods used to ask for the start arguments
+    when the provider is enabled.
     """
 
     @property

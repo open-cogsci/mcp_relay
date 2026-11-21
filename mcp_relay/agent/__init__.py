@@ -33,6 +33,7 @@ from .protocol import (FATAL_CLOSE_CODES, MAX_MESSAGE, RESERVED_SERVER_NAMES,
                        SERVER_NAME_RE, dumps, validate_server_list)
 from .servers import (MCPServer, ArgsProvider, InProcessServerProvider,
                       LocalServer, LocalServerInstance, OnExit, ProviderBase,
+                      STATUS_MESSAGE_DISABLED, STATUS_MESSAGE_ENABLED,
                       SendFrame, ServerProvider, StdioServerProvider,
                       UrlServerProvider, call_args_provider, check_providers,
                       enabled_providers, parse_server_spec)
@@ -56,6 +57,8 @@ __all__ = [
     "RelayClient",
     "RelayWidget",
     "SERVER_NAME_RE",
+    "STATUS_MESSAGE_DISABLED",
+    "STATUS_MESSAGE_ENABLED",
     "SendFrame",
     "ServerProvider",
     "StdioServerProvider",

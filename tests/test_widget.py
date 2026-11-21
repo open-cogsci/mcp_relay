@@ -277,3 +277,48 @@ def test_lost_connection_ends_in_fatal_state_with_connect_and_unpair(qapp, tmp_p
     finally:
         w.close()
         w.deleteLater()
+
+
+def test_toggle_buttons_show_provider_status_messages(widget):
+    """The toggle buttons show the provider status in small print: "Click to
+    enable" while disabled, "Click to disable" while enabled; toggling
+    refreshes it immediately (the widget also polls it on a short timer)."""
+    assert widget._toggle_buttons["hello"].status_message() == "Click to disable"
+    assert widget._toggle_buttons["files"].status_message() == "Click to enable"
+    widget.set_server_enabled("files", True)  # no args_provider: enable succeeds
+    assert widget._toggle_buttons["files"].status_message() == "Click to disable"
+    widget.set_server_enabled("files", False)
+    assert widget._toggle_buttons["files"].status_message() == "Click to enable"
+    # An empty status line disappears entirely instead of leaving a blank gap
+    import mcp_relay.agent.widget as widget_mod
+    assert isinstance(widget._toggle_buttons["files"], widget_mod._ServerToggleRow)
+    btn = widget._toggle_buttons["files"]
+    btn.set_status_message("")
+    assert btn._status_label.isHidden()
+    btn.set_status_message("Click to enable")
+    assert not btn._status_label.isHidden()
+
+
+def test_widget_surfaces_live_inprocess_status_message(widget):
+    """While an in-process session is live, the provider reports the live
+    MCPServer's status_message; the widget's poll pushes it to the button."""
+
+    class FakeMCPServer:
+        @property
+        def status_message(self) -> str:
+            return "3 experiments open"
+
+    hello = widget._providers["hello"]
+    hello._live_servers.append(FakeMCPServer())
+    widget._refresh_status_messages()
+    assert widget._toggle_buttons["hello"].status_message() == "3 experiments open"
+    hello._live_servers.clear()
+    widget._refresh_status_messages()
+    assert widget._toggle_buttons["hello"].status_message() == "Click to disable"
+
+
+def test_toggle_row_rendering_smoke(widget):
+    """Render the widget once (offscreen): the checkbox + status-label rows
+    must paint without errors."""
+    pix = widget.grab()
+    assert not pix.isNull()

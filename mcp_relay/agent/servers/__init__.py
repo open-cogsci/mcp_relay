@@ -13,7 +13,8 @@ from mcp.server import MCPServer
 
 from ..protocol import RESERVED_SERVER_NAMES, SERVER_NAME_RE
 from .base import (ArgsProvider, LocalServerInstance, OnExit, ProviderBase,
-                   SendFrame, ServerProvider, call_args_provider)
+                   STATUS_MESSAGE_DISABLED, STATUS_MESSAGE_ENABLED, SendFrame,
+                   ServerProvider, call_args_provider)
 from .inprocess import InProcessServerProvider
 from .stdio import LocalServer, StdioServerProvider, parse_server_spec
 from .url import UrlServerProvider
@@ -48,6 +49,8 @@ __all__ = [
     "OnExit",
     "ProviderBase",
     "SendFrame",
+    "STATUS_MESSAGE_DISABLED",
+    "STATUS_MESSAGE_ENABLED",
     "ServerProvider",
     "StdioServerProvider",
     "UrlServerProvider",

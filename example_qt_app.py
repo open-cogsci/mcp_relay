@@ -3,7 +3,7 @@
 
 Launches one relay agent that exposes three MCP servers, one of each kind:
 
-  hello   in-process dummy MCP server (a hello_world tool), runs inside this process
+  hello   in-process dummy MCP server (a hello_world tool and a live status_message), runs inside this process
   files   stdio subprocess: node_modules/.bin/mcp-server-filesystem <fs-root>
   remote  URL passthrough to a streamable-HTTP MCP server
 
@@ -21,6 +21,9 @@ The example also demonstrates the flexible server configuration:
   stdio command. Disabling and re-enabling the server asks for the folder
   anew. While connected the enabled set is pushed to the relay in a
   "servers" frame, otherwise it applies on the next connect,
+* the in-process 'hello' server defines a ``status_message`` property, so
+  while a chat session is live its toggle button shows a per-session tool
+  call count in small print instead of the default "Click to disable",
 
 Usage:
 
@@ -46,25 +49,45 @@ from mcp_relay.agent import (MCPServer, InProcessServerProvider, RelayWidget,
 REPO_DIR = Path(__file__).resolve().parent
 
 
+class HelloServer(MCPServer):
+    """A dummy in-process MCP server with one tool and a live status message.
+
+    The status_message property mirrors what the agent's toggle button shows
+    in small print while a chat session is live: every tool call this session
+    serves is counted there, so you can watch the button update from the
+    chat. Between sessions there is no server instance to ask and the button
+    falls back to the default "Click to disable".
+    """
+
+    def __init__(self):
+        super().__init__("hello")
+        self._calls = 0
+
+        @self.tool()
+        def hello_world(name: str = "world") -> str:
+            """Say hello. Reports which machine and process the tool ran in, proving
+            the call really executed where expected."""
+            import platform
+            import socket
+
+            self._calls += 1
+            return (f"Hello, {name}! This ran in pid {os.getpid()} on "
+                    f"{socket.gethostname()} ({platform.system()}).")
+
+    @property
+    def status_message(self) -> str:
+        if not self._calls:
+            return "no tool calls served yet this session"
+        return f"{self._calls} tool call{'' if self._calls == 1 else 's'} served this session"
+
+
 def make_hello_server():
-    """A dummy MCP server with one tool (fresh instance per session).
+    """Build the demo 'hello' server (fresh instance per session).
 
     Used both for the in-process 'hello' server and (over HTTP) for the demo
     'remote' server, so you can compare the two paths in LibreChat.
     """
-    import platform
-    import socket
-
-    server = MCPServer("hello")
-
-    @server.tool()
-    def hello_world(name: str = "world") -> str:
-        """Say hello. Reports which machine and process the tool ran in, proving
-        the call really executed where expected."""
-        return (f"Hello, {name}! This ran in pid {os.getpid()} on "
-                f"{socket.gethostname()} ({platform.system()}).")
-
-    return server
+    return HelloServer()
 
 
 def start_demo_remote_server(port: int) -> None:
