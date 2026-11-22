@@ -109,7 +109,7 @@ STATUS_TEXTS = {
                       f"and ask for a code"),
     "connecting": f"Connecting to {CHAT_LINK} …",
     "connected": f"Connected to {CHAT_LINK}",
-    "fatal": (f"Connection to {CHAT_LINK}' was lost. This may be because "
+    "fatal": (f"Connection to {CHAT_LINK} was lost. This may be because "
               f"another agent connected or because of a network error."),
 }
 
@@ -375,6 +375,7 @@ class RelayWidget(QWidget):
     state_changed = Signal(str)
     pair_done = Signal(bool, str)
     servers_changed = Signal(list)
+    switch_to_sigmund_2 = Signal()
 
     def __init__(self, parent=None, *, relay_url: str, providers: dict,
                  state_file=DEFAULT_STATE_FILE, device_name: str | None = None,
@@ -430,22 +431,31 @@ class RelayWidget(QWidget):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("MCP relay")
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        self._layout = QVBoxLayout(self)
+        self._layout.setSpacing(10)
+        
+        # Use a small font (80% of the default font) and allow word wrapping on
+        # the button
+        self._switch_version_button = QPushButton("Switch back to Sigmund 2")
+        self._switch_version_button.setFlat(True)
+        font_size = self._switch_version_button.font().pointSize() * 0.8
+        self._switch_version_button.setStyleSheet(f"font-size: {font_size}pt; text-decoration: underline;")
+        self._switch_version_button.clicked.connect(self.switch_to_sigmund_2.emit)
+        self._layout.insertWidget(0, self._switch_version_button)        
         
         pix_label = QLabel()
         pix_label.setAlignment(Qt.AlignCenter)
         pixmap = QPixmap(os.path.join(os.path.dirname(__file__),
                                       'sigmund-full.png'))
         pix_label.setPixmap(pixmap)
-        layout.addWidget(pix_label)
+        self._layout.addWidget(pix_label)
         
         self._status_label = QLabel()
         self._status_label.setTextFormat(Qt.RichText)
         self._status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self._status_label.setWordWrap(True)
         self._status_label.setOpenExternalLinks(True)
-        layout.addWidget(self._status_label)
+        self._layout.addWidget(self._status_label)
 
         # One toggle row per available MCP server: a checkbox (circle icon +
         # display name) with the provider's status_message in small print
@@ -486,7 +496,7 @@ class RelayWidget(QWidget):
                     btn.blockSignals(True)  # no toggled handler while the UI is still building
                     btn.setChecked(False)
                     btn.blockSignals(False)
-        layout.addWidget(self._servers_container)
+        self._layout.addWidget(self._servers_container)
 
         # Pairing input, wrapped in a container so it can be shown only
         # when the user actually needs to enter a pairing code.
@@ -500,7 +510,7 @@ class RelayWidget(QWidget):
         self._pair_btn.clicked.connect(self._on_pair_clicked)
         pair_row.addWidget(self._code_edit, 1)
         pair_row.addWidget(self._pair_btn)
-        layout.addWidget(self._pair_container)
+        self._layout.addWidget(self._pair_container)
 
         btn_row = QHBoxLayout()
         self._connect_btn = QPushButton("Connect")
@@ -513,8 +523,8 @@ class RelayWidget(QWidget):
         btn_row.addWidget(self._connect_btn)
         btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._action_btn)
-        layout.addLayout(btn_row)        
-        layout.addStretch()
+        self._layout.addLayout(btn_row)        
+        self._layout.addStretch()
 
     def _status_text(self) -> str:
         return STATUS_TEXTS[self._state]
